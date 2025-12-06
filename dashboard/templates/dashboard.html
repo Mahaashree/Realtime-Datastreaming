@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vehicle Speed Monitoring Dashboard</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .header h1 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+
+        .status-bar {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            margin-top: 15px;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .status-online {
+            background-color: #10b981;
+            box-shadow: 0 0 8px #10b981;
+        }
+
+        .status-offline {
+            background-color: #ef4444;
+            box-shadow: 0 0 8px #ef4444;
+        }
+
+        .status-unknown {
+            background-color: #6b7280;
+        }
+
+        .charts-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .chart-card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .chart-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .chart-speed {
+            font-size: 24px;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .chart-container {
+            position: relative;
+            height: 200px;
+        }
+
+        .data-table {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .data-table h2 {
+            margin-bottom: 15px;
+            color: #333;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        th {
+            background-color: #f9fafb;
+            font-weight: 600;
+            color: #374151;
+        }
+
+        tr:hover {
+            background-color: #f9fafb;
+        }
+
+        .connection-status {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 10px 20px;
+            background: white;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .connection-status.connected {
+            border-left: 4px solid #10b981;
+        }
+
+        .connection-status.disconnected {
+            border-left: 4px solid #ef4444;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚗 Vehicle Speed Monitoring Dashboard</h1>
+            <p>Real-time data streaming from 10 vehicle devices</p>
+            <div class="status-bar" id="statusBar">
+                <!-- Device status indicators will be inserted here -->
+            </div>
+        </div>
+
+        <div class="connection-status disconnected" id="connectionStatus">
+            <span class="status-indicator" id="connectionIndicator"></span>
+            <span id="connectionText">Connecting...</span>
+        </div>
+
+        <div class="charts-grid" id="chartsGrid">
+            <!-- Charts will be inserted here -->
+        </div>
+
+        <div class="data-table">
+            <h2>Latest Speed Data</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Device ID</th>
+                        <th>Status</th>
+                        <th>Speed (km/h)</th>
+                        <th>Last Update</th>
+                    </tr>
+                </thead>
+                <tbody id="dataTableBody">
+                    <!-- Table rows will be inserted here -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        // Initialize Socket.IO connection
+        const socket = io();
+        const charts = {};
+        const deviceData = {};
+        const MAX_DATA_POINTS = 50;
+
+        // Connection status
+        socket.on('connect', () => {
+            document.getElementById('connectionStatus').classList.remove('disconnected');
+            document.getElementById('connectionStatus').classList.add('connected');
+            document.getElementById('connectionIndicator').classList.add('status-online');
+            document.getElementById('connectionText').textContent = 'Connected';
+        });
+
+        socket.on('disconnect', () => {
+            document.getElementById('connectionStatus').classList.remove('connected');
+            document.getElementById('connectionStatus').classList.add('disconnected');
+            document.getElementById('connectionIndicator').classList.remove('status-online');
+            document.getElementById('connectionText').textContent = 'Disconnected';
+        });
+
+        // Initialize charts for 10 devices
+        function initializeCharts() {
+            const chartsGrid = document.getElementById('chartsGrid');
+            
+            for (let i = 1; i <= 10; i++) {
+                const deviceId = `vehicle_${String(i).padStart(2, '0')}`;
+                
+                // Create chart card
+                const card = document.createElement('div');
+                card.className = 'chart-card';
+                card.id = `card-${deviceId}`;
+                
+                card.innerHTML = `
+                    <div class="chart-header">
+                        <div>
+                            <div class="chart-title">${deviceId}</div>
+                            <div class="chart-speed" id="speed-${deviceId}">-- km/h</div>
+                        </div>
+                        <span class="status-indicator status-unknown" id="status-${deviceId}"></span>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="chart-${deviceId}"></canvas>
+                    </div>
+                `;
+                
+                chartsGrid.appendChild(card);
+                
+                // Initialize Chart.js
+                const ctx = document.getElementById(`chart-${deviceId}`).getContext('2d');
+                charts[deviceId] = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: [],
+                        datasets: [{
+                            label: 'Speed (km/h)',
+                            data: [],
+                            borderColor: 'rgb(102, 126, 234)',
+                            backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                            tension: 0.4,
+                            fill: true
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                display: false
+                            }
+                        },
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                max: 120,
+                                title: {
+                                    display: true,
+                                    text: 'Speed (km/h)'
+                                }
+                            },
+                            x: {
+                                display: false
+                            }
+                        },
+                        animation: {
+                            duration: 300
+                        }
+                    }
+                });
+                
+                deviceData[deviceId] = {
+                    speeds: [],
+                    timestamps: [],
+                    status: 'unknown'
+                };
+            }
+        }
+
+        // Update chart with new data
+        function updateChart(deviceId, speed, timestamp) {
+            if (!charts[deviceId]) return;
+            
+            const chart = charts[deviceId];
+            const data = deviceData[deviceId];
+            
+            // Add new data point
+            data.speeds.push(speed);
+            data.timestamps.push(new Date(timestamp * 1000).toLocaleTimeString());
+            
+            // Keep only last MAX_DATA_POINTS
+            if (data.speeds.length > MAX_DATA_POINTS) {
+                data.speeds.shift();
+                data.timestamps.shift();
+            }
+            
+            // Update chart
+            chart.data.labels = data.timestamps;
+            chart.data.datasets[0].data = data.speeds;
+            chart.update('none'); // Update without animation for performance
+            
+            // Update speed display
+            document.getElementById(`speed-${deviceId}`).textContent = `${speed.toFixed(1)} km/h`;
+        }
+
+        // Update device status
+        function updateDeviceStatus(deviceId, status) {
+            const indicator = document.getElementById(`status-${deviceId}`);
+            if (indicator) {
+                indicator.className = 'status-indicator';
+                if (status === 'online') {
+                    indicator.classList.add('status-online');
+                } else if (status === 'offline') {
+                    indicator.classList.add('status-offline');
+                } else {
+                    indicator.classList.add('status-unknown');
+                }
+            }
+            
+            if (deviceData[deviceId]) {
+                deviceData[deviceId].status = status;
+            }
+        }
+
+        // Update status bar
+        function updateStatusBar() {
+            const statusBar = document.getElementById('statusBar');
+            statusBar.innerHTML = '';
+            
+            for (let i = 1; i <= 10; i++) {
+                const deviceId = `vehicle_${String(i).padStart(2, '0')}`;
+                const status = deviceData[deviceId]?.status || 'unknown';
+                
+                const item = document.createElement('div');
+                item.className = 'status-item';
+                item.innerHTML = `
+                    <span class="status-indicator ${status === 'online' ? 'status-online' : status === 'offline' ? 'status-offline' : 'status-unknown'}"></span>
+                    <span>${deviceId}</span>
+                `;
+                statusBar.appendChild(item);
+            }
+        }
+
+        // Update data table
+        function updateDataTable() {
+            const tbody = document.getElementById('dataTableBody');
+            tbody.innerHTML = '';
+            
+            const devices = Object.keys(deviceData).sort();
+            
+            devices.forEach(deviceId => {
+                const data = deviceData[deviceId];
+                const latestSpeed = data.speeds.length > 0 ? data.speeds[data.speeds.length - 1] : '--';
+                const latestTimestamp = data.timestamps.length > 0 ? data.timestamps[data.timestamps.length - 1] : '--';
+                
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${deviceId}</td>
+                    <td>
+                        <span class="status-indicator ${data.status === 'online' ? 'status-online' : data.status === 'offline' ? 'status-offline' : 'status-unknown'}"></span>
+                        ${data.status}
+                    </td>
+                    <td>${latestSpeed === '--' ? '--' : latestSpeed.toFixed(1)}</td>
+                    <td>${latestTimestamp}</td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        // Handle latest data from WebSocket
+        socket.on('latest_data', (data) => {
+            Object.keys(data).forEach(deviceId => {
+                const speed = data[deviceId].speed;
+                const timestamp = data[deviceId].timestamp;
+                
+                updateChart(deviceId, speed, timestamp);
+                updateDeviceStatus(deviceId, 'online');
+            });
+            
+            updateStatusBar();
+            updateDataTable();
+        });
+
+        // Fetch device status periodically
+        async function fetchDeviceStatus() {
+            try {
+                const response = await fetch('/api/devices/status');
+                const statuses = await response.json();
+                
+                Object.keys(statuses).forEach(deviceId => {
+                    updateDeviceStatus(deviceId, statuses[deviceId].status);
+                });
+                
+                updateStatusBar();
+                updateDataTable();
+            } catch (error) {
+                console.error('Error fetching device status:', error);
+            }
+        }
+
+        // Initialize on page load
+        initializeCharts();
+        
+        // Fetch device status every 5 seconds
+        setInterval(fetchDeviceStatus, 5000);
+        fetchDeviceStatus();
+        
+        // Update table every second
+        setInterval(updateDataTable, 1000);
+    </script>
+</body>
+</html>
+

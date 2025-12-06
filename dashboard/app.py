@@ -28,8 +28,10 @@ app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'dev-secret-key-change-
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 # InfluxDB configuration - Support both local and remote
+# Default to localhost for local development
 INFLUXDB_URL_PRIMARY = os.getenv("INFLUXDB_URL", "http://localhost:8086")
-INFLUXDB_URL_FALLBACK = os.getenv("INFLUXDB_URL_FALLBACK", "http://influxdb.secruin.cloud:8086")
+# Only use fallback if explicitly set (don't default to domain for local dev)
+INFLUXDB_URL_FALLBACK = os.getenv("INFLUXDB_URL_FALLBACK", None)
 INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN")
 INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "my-org")
 INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "vehicle-data")
@@ -44,8 +46,12 @@ def init_influxdb():
     """Initialize InfluxDB connection with automatic fallback between local and remote."""
     global influx_client, query_api, influxdb_connected, current_influxdb_url
     
-    # List of URLs to try (primary first, then fallback)
+    # List of URLs to try (always try localhost first for local development)
     urls_to_try = []
+    
+    # Always prioritize localhost if it's not already in the list
+    localhost_url = "http://localhost:8086"
+    domain_url = "http://influxdb.secruin.cloud:8086"
     
     # Add primary URL if set
     if INFLUXDB_URL_PRIMARY:
@@ -55,9 +61,19 @@ def init_influxdb():
     if INFLUXDB_URL_FALLBACK and INFLUXDB_URL_FALLBACK != INFLUXDB_URL_PRIMARY:
         urls_to_try.append(INFLUXDB_URL_FALLBACK)
     
-    # If no URLs configured, use defaults
+    # If no URLs configured, use defaults (localhost first)
     if not urls_to_try:
-        urls_to_try = ["http://localhost:8086", "http://influxdb.secruin.cloud:8086"]
+        urls_to_try = [localhost_url]
+        # Only add domain fallback if explicitly configured
+        if INFLUXDB_URL_FALLBACK:
+            urls_to_try.append(domain_url)
+    else:
+        # Reorder to try localhost first if it's in the list
+        if localhost_url in urls_to_try:
+            urls_to_try.remove(localhost_url)
+            urls_to_try.insert(0, localhost_url)
+    
+    logger.info(f"InfluxDB connection URLs to try: {', '.join(urls_to_try)}")
     
     # Try each URL until one works
     for url in urls_to_try:
@@ -82,7 +98,7 @@ def init_influxdb():
             return
             
         except Exception as e:
-            logger.debug(f"Failed to connect to {url}: {e}")
+            logger.warning(f"✗ Failed to connect to {url}: {e}")
             if influx_client:
                 try:
                     influx_client.close()
@@ -126,12 +142,14 @@ def get_devices_status():
     
     if not influxdb_connected:
         # Try to reconnect
+        logger.info("InfluxDB not connected, attempting to reconnect...")
         init_influxdb()
         if not influxdb_connected:
             return jsonify({
                 "error": "InfluxDB connection failed",
                 "message": f"Cannot connect to InfluxDB. Tried: {INFLUXDB_URL_PRIMARY}, {INFLUXDB_URL_FALLBACK}",
-                "current_url": current_influxdb_url or "none"
+                "current_url": current_influxdb_url or "none",
+                "tip": "Check that InfluxDB is running. For local dev, use: INFLUXDB_URL=http://localhost:8086"
             }), 503
     
     try:
@@ -261,8 +279,9 @@ def broadcast_latest_data():
         
         while True:
             try:
-                # Check connection status
+                # Check connection status and verify it's still working
                 if not influxdb_connected:
+                    logger.info("InfluxDB disconnected, attempting to reconnect...")
                     init_influxdb()
                     if not influxdb_connected:
                         consecutive_errors += 1
@@ -273,6 +292,18 @@ def broadcast_latest_data():
                         else:
                             time.sleep(5)
                         continue
+                else:
+                    # Verify connection is still alive
+                    try:
+                        influx_client.ping()
+                    except Exception as e:
+                        logger.warning(f"InfluxDB connection lost: {e}. Reconnecting...")
+                        influxdb_connected = False
+                        init_influxdb()
+                        if not influxdb_connected:
+                            consecutive_errors += 1
+                            time.sleep(5)
+                            continue
                 
                 # Query latest data for all devices
                 # Support both measurement names (Python collector and Telegraf)

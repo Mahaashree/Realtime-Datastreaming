@@ -10,6 +10,11 @@ A proof-of-concept implementation for real-time vehicle speed data streaming usi
 - **Flask Dashboard**: Web interface with real-time updates via WebSockets
 - **Offline Queue**: SQLite-based queue per device for network failure handling
 
+### Deployment Options
+
+- **Local Development**: Run all components on a single machine (see Setup Instructions below)
+- **Distributed Deployment**: Deploy across multiple VPS instances using Cloudflare Tunnels (see [DEPLOYMENT.md](DEPLOYMENT.md))
+
 ## Tech Stack
 
 - **Python 3.11+** with `uv` for package management
@@ -183,7 +188,14 @@ Realtime-Datastreaming/
 │       └── config/
 │           └── mosquitto.conf   # Mosquitto configuration
 ├── requirements.txt             # Python dependencies
-├── env.example                  # Environment variables template
+├── env.example                  # Environment variables template (local dev)
+├── env.example.vps1-docker      # Environment for VPS 1 (Docker services)
+├── env.example.vps2-flask       # Environment for VPS 2 (Flask dashboard)
+├── env.example.device           # Environment for device simulators
+├── cloudflare/                  # Cloudflare tunnel configurations
+│   ├── tunnel-config.example.yml
+│   └── tunnel-config-flask.example.yml
+├── DEPLOYMENT.md                # Distributed deployment guide
 └── README.md                    # This file
 ```
 

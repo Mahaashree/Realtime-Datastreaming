@@ -1,0 +1,20 @@
+# Cloudflare Tunnel Configuration for Flask Dashboard (VPS Instance 2)
+# Save this as config.yml in your cloudflared directory on Flask VPS
+
+tunnel: <your-tunnel-id>
+credentials-file: /path/to/credentials.json
+
+ingress:
+  # Flask Dashboard - HTTP tunnel
+  - hostname: dashboard.secruin.cloud
+    service: http://localhost:5000
+    originRequest:
+      connectTimeout: 30s
+      tcpKeepAlive: 30s
+      keepAliveTimeout: 90s
+      keepAliveConnections: 100
+      httpHostHeader: dashboard.secruin.cloud
+
+  # Catch-all rule (must be last)
+  - service: http_status:404
+

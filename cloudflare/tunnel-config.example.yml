@@ -1,0 +1,28 @@
+# Cloudflare Tunnel Configuration Example
+# This is a template for cloudflared tunnel configuration
+# Save this as config.yml in your cloudflared directory
+
+# Tunnel configuration for VPS Instance 1 (Docker Services)
+tunnel: <your-tunnel-id>
+credentials-file: /path/to/credentials.json
+
+ingress:
+  # MQTT Broker (Mosquitto) - TCP tunnel
+  - hostname: mqtt.secruin.cloud
+    service: tcp://localhost:1883
+    originRequest:
+      noHappyEyeballs: true
+      tcpKeepAlive: 30
+
+  # InfluxDB HTTP API - HTTP tunnel
+  - hostname: influxdb.secruin.cloud
+    service: http://localhost:8086
+    originRequest:
+      connectTimeout: 30s
+      tcpKeepAlive: 30s
+      keepAliveTimeout: 90s
+      keepAliveConnections: 100
+
+  # Catch-all rule (must be last)
+  - service: http_status:404
+

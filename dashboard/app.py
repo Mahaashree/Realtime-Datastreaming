@@ -27,8 +27,9 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'dev-secret-key-change-in-production')
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# InfluxDB configuration
-INFLUXDB_URL = os.getenv("INFLUXDB_URL", "http://localhost:8086")
+# InfluxDB configuration - Support both local and remote
+INFLUXDB_URL_PRIMARY = os.getenv("INFLUXDB_URL", "http://localhost:8086")
+INFLUXDB_URL_FALLBACK = os.getenv("INFLUXDB_URL_FALLBACK", "http://influxdb.secruin.cloud:8086")
 INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN")
 INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "my-org")
 INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "vehicle-data")
@@ -36,17 +37,68 @@ INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "vehicle-data")
 # Initialize InfluxDB client
 influx_client = None
 query_api = None
+influxdb_connected = False
+current_influxdb_url = None
 
-try:
-    influx_client = InfluxDBClient(
-        url=INFLUXDB_URL,
-        token=INFLUXDB_TOKEN,
-        org=INFLUXDB_ORG
-    )
-    query_api = influx_client.query_api()
-    logger.info("Connected to InfluxDB")
-except Exception as e:
-    logger.error(f"Failed to initialize InfluxDB: {e}")
+def init_influxdb():
+    """Initialize InfluxDB connection with automatic fallback between local and remote."""
+    global influx_client, query_api, influxdb_connected, current_influxdb_url
+    
+    # List of URLs to try (primary first, then fallback)
+    urls_to_try = []
+    
+    # Add primary URL if set
+    if INFLUXDB_URL_PRIMARY:
+        urls_to_try.append(INFLUXDB_URL_PRIMARY)
+    
+    # Add fallback URL if different from primary
+    if INFLUXDB_URL_FALLBACK and INFLUXDB_URL_FALLBACK != INFLUXDB_URL_PRIMARY:
+        urls_to_try.append(INFLUXDB_URL_FALLBACK)
+    
+    # If no URLs configured, use defaults
+    if not urls_to_try:
+        urls_to_try = ["http://localhost:8086", "http://influxdb.secruin.cloud:8086"]
+    
+    # Try each URL until one works
+    for url in urls_to_try:
+        try:
+            logger.info(f"Attempting to connect to InfluxDB at {url}")
+            test_client = InfluxDBClient(
+                url=url,
+                token=INFLUXDB_TOKEN,
+                org=INFLUXDB_ORG,
+                timeout=5  # Shorter timeout for faster fallback
+            )
+            
+            # Test connection
+            test_client.ping()
+            
+            # Connection successful - use this URL
+            influx_client = test_client
+            query_api = influx_client.query_api()
+            influxdb_connected = True
+            current_influxdb_url = url
+            logger.info(f"✓ Successfully connected to InfluxDB at {url}")
+            return
+            
+        except Exception as e:
+            logger.debug(f"Failed to connect to {url}: {e}")
+            if influx_client:
+                try:
+                    influx_client.close()
+                except:
+                    pass
+            continue
+    
+    # All URLs failed
+    influxdb_connected = False
+    logger.error("Failed to connect to InfluxDB at any configured URL")
+    logger.error(f"Tried URLs: {', '.join(urls_to_try)}")
+    logger.error("Make sure InfluxDB is running and accessible.")
+    logger.info("Tip: Set INFLUXDB_URL for primary, INFLUXDB_URL_FALLBACK for secondary")
+
+# Initialize on startup
+init_influxdb()
 
 
 @app.route('/')
@@ -55,15 +107,41 @@ def index():
     return render_template('dashboard.html')
 
 
+@app.route('/api/health')
+def health_check():
+    """Health check endpoint showing InfluxDB connection status."""
+    return jsonify({
+        "status": "healthy" if influxdb_connected else "degraded",
+        "influxdb_connected": influxdb_connected,
+        "influxdb_url": current_influxdb_url or "none",
+        "primary_url": INFLUXDB_URL_PRIMARY,
+        "fallback_url": INFLUXDB_URL_FALLBACK if INFLUXDB_URL_FALLBACK != INFLUXDB_URL_PRIMARY else None
+    })
+
+
 @app.route('/api/devices/status')
 def get_devices_status():
     """Get status of all devices."""
+    global influxdb_connected
+    
+    if not influxdb_connected:
+        # Try to reconnect
+        init_influxdb()
+        if not influxdb_connected:
+            return jsonify({
+                "error": "InfluxDB connection failed",
+                "message": f"Cannot connect to InfluxDB. Tried: {INFLUXDB_URL_PRIMARY}, {INFLUXDB_URL_FALLBACK}",
+                "current_url": current_influxdb_url or "none"
+            }), 503
+    
     try:
         # Query last seen timestamp for each device
+        # Try both measurement names (Python collector uses "vehicle_speed", Telegraf uses "mqtt_consumer")
         query = f'''
         from(bucket: "{INFLUXDB_BUCKET}")
           |> range(start: -1h)
-          |> filter(fn: (r) => r["_measurement"] == "vehicle_speed")
+          |> filter(fn: (r) => r["_measurement"] == "vehicle_speed" or r["_measurement"] == "mqtt_consumer")
+          |> filter(fn: (r) => r["_field"] == "speed")
           |> group(columns: ["device_id"])
           |> last()
           |> keep(columns: ["device_id", "_time"])
@@ -92,7 +170,11 @@ def get_devices_status():
         return jsonify(devices_status)
     except Exception as e:
         logger.error(f"Error getting device status: {e}")
-        return jsonify({"error": str(e)}), 500
+        influxdb_connected = False  # Mark as disconnected
+        return jsonify({
+            "error": str(e),
+            "message": "Failed to query InfluxDB. Check connection and try again."
+        }), 500
 
 
 @app.route('/api/devices/<device_id>/latest')
@@ -173,13 +255,32 @@ def broadcast_latest_data():
     import threading
     
     def broadcast_loop():
+        global influxdb_connected
+        consecutive_errors = 0
+        max_errors = 5
+        
         while True:
             try:
+                # Check connection status
+                if not influxdb_connected:
+                    init_influxdb()
+                    if not influxdb_connected:
+                        consecutive_errors += 1
+                        if consecutive_errors >= max_errors:
+                            logger.warning(f"InfluxDB still disconnected after {max_errors} attempts. Retrying in 30s...")
+                            time.sleep(30)
+                            consecutive_errors = 0
+                        else:
+                            time.sleep(5)
+                        continue
+                
                 # Query latest data for all devices
+                # Support both measurement names (Python collector and Telegraf)
                 query = f'''
                 from(bucket: "{INFLUXDB_BUCKET}")
                   |> range(start: -10s)
-                  |> filter(fn: (r) => r["_measurement"] == "vehicle_speed")
+                  |> filter(fn: (r) => r["_measurement"] == "vehicle_speed" or r["_measurement"] == "mqtt_consumer")
+                  |> filter(fn: (r) => r["_field"] == "speed")
                   |> group(columns: ["device_id"])
                   |> last()
                 '''
@@ -197,11 +298,21 @@ def broadcast_latest_data():
                 
                 if latest_data:
                     socketio.emit('latest_data', latest_data)
+                    consecutive_errors = 0  # Reset error counter on success
                 
                 time.sleep(1)  # Broadcast every second
             except Exception as e:
+                consecutive_errors += 1
+                influxdb_connected = False
                 logger.error(f"Error broadcasting data: {e}")
-                time.sleep(5)
+                # Try to reconnect
+                init_influxdb()
+                if consecutive_errors >= max_errors:
+                    logger.warning(f"Multiple broadcast errors. Waiting 10s before retry...")
+                    time.sleep(10)
+                    consecutive_errors = 0
+                else:
+                    time.sleep(2)
     
     # Start broadcast thread
     thread = threading.Thread(target=broadcast_loop, daemon=True)

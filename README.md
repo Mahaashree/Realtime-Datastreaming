@@ -62,22 +62,40 @@ uv pip install -r requirements.txt
 
 Copy the example environment file and update with your settings:
 
+**Option 1: Universal Configuration (Recommended)**
 ```bash
-# On Windows:
-copy env.example .env
-# On Linux/Mac:
+# Works for both local and production - automatically tries both
+cp env.example.universal .env
+```
+
+**Option 2: Local Development Only**
+```bash
 cp env.example .env
 ```
 
-Edit `.env` file with your configuration (defaults should work for local development):
+**Option 3: Production Only**
+```bash
+cp env.example.vps2-flask .env
+```
+
+The universal configuration (`env.example.universal`) allows the dashboard to work both locally and via domain by automatically trying:
+1. Primary URL (e.g., `http://localhost:8086`)
+2. Fallback URL (e.g., `http://influxdb.secruin.cloud:8086`)
+
+Edit `.env` file with your configuration:
 
 ```env
-MQTT_BROKER_HOST=localhost
-MQTT_BROKER_PORT=1883
+# Primary InfluxDB URL (tried first)
 INFLUXDB_URL=http://localhost:8086
+
+# Fallback InfluxDB URL (tried if primary fails)
+INFLUXDB_URL_FALLBACK=http://influxdb.secruin.cloud:8086
+
 INFLUXDB_TOKEN=my-super-secret-auth-token
 INFLUXDB_ORG=my-org
 INFLUXDB_BUCKET=vehicle-data
+MQTT_BROKER_HOST=localhost
+MQTT_BROKER_PORT=1883
 FLASK_HOST=0.0.0.0
 FLASK_PORT=5000
 ```
@@ -234,6 +252,7 @@ Realtime-Datastreaming/
 ## API Endpoints
 
 - `GET /` - Dashboard page
+- `GET /api/health` - Health check showing InfluxDB connection status
 - `GET /api/devices/status` - Get status of all devices
 - `GET /api/devices/<device_id>/latest` - Get latest speed for a device
 - `GET /api/devices/<device_id>/history?duration=5m` - Get historical data

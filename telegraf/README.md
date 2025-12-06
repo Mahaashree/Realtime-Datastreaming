@@ -156,6 +156,30 @@ Add processors to filter or transform data:
 
 ## Troubleshooting
 
+### Docker Permission Errors
+
+If you see `permission denied` errors for Docker socket:
+
+**Option 1: Run Telegraf as root (for Docker metrics)**
+```yaml
+# In docker-compose.yml, add:
+telegraf:
+  user: root  # Required for Docker socket access
+```
+
+**Option 2: Disable Docker metrics (recommended for security)**
+```bash
+# Use the no-docker config file
+cp telegraf.conf.no-docker telegraf.conf
+# Then restart Telegraf
+```
+
+### MQTT Server Format Warning
+
+If you see: `Server "host:port" should be updated to use scheme://host:port format`
+
+The config file has been updated to use `tcp://` scheme. Restart Telegraf to apply changes.
+
 ### Telegraf Not Receiving MQTT Messages
 
 1. Check MQTT broker connection:
@@ -170,7 +194,7 @@ Add processors to filter or transform data:
 
 3. Verify configuration:
    ```bash
-   telegraf --config /etc/telegraf/telegraf.conf --test
+   docker exec telegraf telegraf --config /etc/telegraf/telegraf.conf --test
    ```
 
 ### Data Not Appearing in InfluxDB

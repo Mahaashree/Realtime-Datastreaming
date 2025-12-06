@@ -1,5 +1,6 @@
 # Telegraf Configuration for Real-time Data Streaming PoC
 # This configuration collects MQTT vehicle data and system metrics
+# Version without Docker metrics (no root user required)
 
 [global_tags]
   # Add tags that apply to all metrics
@@ -80,18 +81,18 @@
 # System Process metrics
 [[inputs.processes]]
 
-# Docker container metrics
-[[inputs.docker]]
-  endpoint = "unix:///var/run/docker.sock"
-  container_name_exclude = []
-  container_name_include = []
-  container_state_exclude = []
-  container_state_include = []
-  timeout = "5s"
-  perdevice_include = ["cpu", "blkio", "network"]
-  total = false
-  docker_label_exclude = []
-  docker_label_include = []
+# Docker metrics disabled - uncomment and add user: root to docker-compose if needed
+# [[inputs.docker]]
+#   endpoint = "unix:///var/run/docker.sock"
+#   container_name_exclude = []
+#   container_name_include = []
+#   container_state_exclude = []
+#   container_state_include = []
+#   timeout = "5s"
+#   perdevice_include = ["cpu", "blkio", "network"]
+#   total = false
+#   docker_label_exclude = []
+#   docker_label_include = []
 
 # InfluxDB v2 Output Plugin
 [[outputs.influxdb_v2]]

@@ -83,7 +83,7 @@ def init_influxdb():
                 url=url,
                 token=INFLUXDB_TOKEN,
                 org=INFLUXDB_ORG,
-                timeout=5  # Shorter timeout for faster fallback
+                timeout=30000  # 30 seconds timeout (in milliseconds)
             )
             
             # Test connection
@@ -165,7 +165,13 @@ def get_devices_status():
           |> keep(columns: ["device_id", "_time"])
         '''
         
-        result = query_api.query(query)
+        try:
+            result = query_api.query(query=query)
+        except Exception as e:
+            if "context canceled" in str(e).lower():
+                logger.warning("Query canceled for device status, may be timeout")
+                return jsonify({"error": "Query timeout", "message": "InfluxDB query timed out"}), 504
+            raise
         
         devices_status = {}
         current_time = time.time()
@@ -202,11 +208,17 @@ def get_device_latest(device_id):
         query = f'''
         from(bucket: "{INFLUXDB_BUCKET}")
           |> range(start: -1h)
-          |> filter(fn: (r) => r["_measurement"] == "vehicle_speed" and r["device_id"] == "{device_id}")
+          |> filter(fn: (r) => (r["_measurement"] == "vehicle_speed" or r["_measurement"] == "mqtt_consumer") and r["device_id"] == "{device_id}" and r["_field"] == "speed")
           |> last()
         '''
         
-        result = query_api.query(query)
+        try:
+            result = query_api.query(query=query)
+        except Exception as e:
+            if "context canceled" in str(e).lower():
+                logger.warning(f"Query canceled for device {device_id}, may be timeout")
+                return jsonify({"error": "Query timeout"}), 504
+            raise
         
         for table in result:
             for record in table.records:
@@ -231,12 +243,18 @@ def get_device_history(device_id):
         query = f'''
         from(bucket: "{INFLUXDB_BUCKET}")
           |> range(start: -{duration})
-          |> filter(fn: (r) => r["_measurement"] == "vehicle_speed" and r["device_id"] == "{device_id}")
+          |> filter(fn: (r) => (r["_measurement"] == "vehicle_speed" or r["_measurement"] == "mqtt_consumer") and r["device_id"] == "{device_id}" and r["_field"] == "speed")
           |> aggregateWindow(every: 1s, fn: mean, createEmpty: false)
           |> yield(name: "mean")
         '''
         
-        result = query_api.query(query)
+        try:
+            result = query_api.query(query=query)
+        except Exception as e:
+            if "context canceled" in str(e).lower():
+                logger.warning(f"Query canceled for device {device_id} history, may be timeout")
+                return jsonify({"error": "Query timeout"}), 504
+            raise
         
         data_points = []
         for table in result:
@@ -307,16 +325,32 @@ def broadcast_latest_data():
                 
                 # Query latest data for all devices
                 # Support both measurement names (Python collector and Telegraf)
+                # Optimized: combined filters, shorter time range
                 query = f'''
                 from(bucket: "{INFLUXDB_BUCKET}")
-                  |> range(start: -10s)
-                  |> filter(fn: (r) => r["_measurement"] == "vehicle_speed" or r["_measurement"] == "mqtt_consumer")
-                  |> filter(fn: (r) => r["_field"] == "speed")
+                  |> range(start: -30s)
+                  |> filter(fn: (r) => (r["_measurement"] == "vehicle_speed" or r["_measurement"] == "mqtt_consumer") and r["_field"] == "speed")
                   |> group(columns: ["device_id"])
                   |> last()
                 '''
                 
-                result = query_api.query(query)
+                try:
+                    result = query_api.query(query=query)
+                except Exception as query_error:
+                    # Handle query cancellation/timeout gracefully
+                    error_str = str(query_error).lower()
+                    if "context canceled" in error_str or "timeout" in error_str:
+                        logger.debug(f"Query timeout/canceled (may be normal): {query_error}")
+                        consecutive_errors += 1
+                        if consecutive_errors >= max_errors:
+                            logger.warning("Multiple query timeouts, waiting before retry...")
+                            time.sleep(10)
+                            consecutive_errors = 0
+                        else:
+                            time.sleep(2)
+                        continue
+                    else:
+                        raise
                 
                 latest_data = {}
                 for table in result:

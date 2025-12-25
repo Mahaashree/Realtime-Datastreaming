@@ -234,6 +234,69 @@ def get_device_latest(device_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/devices/<device_id>/telemetry')
+def get_device_telemetry(device_id):
+    """Get latest telemetry data for a device."""
+    try:
+        query = f'''
+        from(bucket: "{INFLUXDB_BUCKET}")
+          |> range(start: -1h)
+          |> filter(fn: (r) => r["_measurement"] == "device_data" and r["device_id"] == "{device_id}")
+          |> filter(fn: (r) => r["_field"] == "cpu_usage" or r["_field"] == "ram_usage" or r["_field"] == "memory_percent")
+          |> last()
+        '''
+        
+        result = query_api.query(query=query)
+        
+        telemetry = {}
+        for table in result:
+            for record in table.records:
+                field = record.get_field()
+                value = record.get_value()
+                telemetry[field] = value
+        
+        return jsonify({
+            "device_id": device_id,
+            "telemetry": telemetry
+        })
+    except Exception as e:
+        logger.error(f"Error getting telemetry: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/devices/<device_id>/detections')
+def get_device_detections(device_id):
+    """Get recent detection labels for a device."""
+    try:
+        duration = request.args.get('duration', '5m')
+        
+        query = f'''
+        from(bucket: "{INFLUXDB_BUCKET}")
+          |> range(start: -{duration})
+          |> filter(fn: (r) => r["_measurement"] == "device_data" and r["device_id"] == "{device_id}")
+          |> filter(fn: (r) => r["_field"] == "detection_confidence")
+          |> keep(columns: ["_time", "detection_label", "detection_confidence"])
+        '''
+        
+        result = query_api.query(query=query)
+        
+        detections = []
+        for table in result:
+            for record in table.records:
+                detections.append({
+                    "timestamp": record.get_time().timestamp(),
+                    "label": record.values.get("detection_label"),
+                    "confidence": record.get_value()
+                })
+        
+        return jsonify({
+            "device_id": device_id,
+            "detections": detections
+        })
+    except Exception as e:
+        logger.error(f"Error getting detections: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/devices/<device_id>/history')
 def get_device_history(device_id):
     """Get historical speed data for a specific device."""
@@ -329,11 +392,11 @@ def broadcast_latest_data():
                 query = f'''
                 from(bucket: "{INFLUXDB_BUCKET}")
                   |> range(start: -30s)
-                  |> filter(fn: (r) => (r["_measurement"] == "vehicle_speed" or r["_measurement"] == "mqtt_consumer") and r["_field"] == "speed")
-                  |> group(columns: ["device_id"])
+                  |> filter(fn: (r) => (r["_measurement"] == "device_data"))
+                  |> group(columns: ["device_id", "_field"])
                   |> last()
                 '''
-                
+
                 try:
                     result = query_api.query(query=query)
                 except Exception as query_error:
@@ -352,14 +415,20 @@ def broadcast_latest_data():
                     else:
                         raise
                 
+                #processing results to group by device
                 latest_data = {}
                 for table in result:
                     for record in table.records:
                         device_id = record.values.get("device_id")
-                        latest_data[device_id] = {
-                            "speed": record.get_value(),
-                            "timestamp": record.get_time().timestamp()
-                        }
+                        field = record.values.get("_field")
+                        value = record.get_value()
+
+                        if device_id not in latest_data:
+                            latest_data[device_id] = {}
+
+                        latest_data[device_id][field] = value
+                        latest_data[device_id]["detection_label"] = record.values.get("detection_label", "normal")
+                        latest_data[device_id]["timestamp"] = record.get_time().timestamp() 
                 
                 if latest_data:
                     socketio.emit('latest_data', latest_data)

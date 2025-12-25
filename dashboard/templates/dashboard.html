@@ -163,6 +163,57 @@
         .connection-status.disconnected {
             border-left: 4px solid #ef4444;
         }
+
+        .telemetry-info {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+            margin-top: 10px;
+            font-size: 12px;
+        }
+
+        .telemetry-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px;
+            background: #f9fafb;
+            border-radius: 4px;
+        }
+
+        .telemetry-label {
+            color: #6b7280;
+            font-weight: 500;
+        }
+
+        .telemetry-value {
+            color: #333;
+            font-weight: 600;
+        }
+
+        .detection-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            margin-top: 8px;
+        }
+
+        .detection-normal {
+            background-color: #d1fae5;
+            color: #065f46;
+        }
+
+        .detection-alert {
+            background-color: #fee2e2;
+            color: #991b1b;
+        }
+
+        .detection-warning {
+            background-color: #fef3c7;
+            color: #92400e;
+        }
     </style>
 </head>
 <body>
@@ -185,13 +236,16 @@
         </div>
 
         <div class="data-table">
-            <h2>Latest Speed Data</h2>
+            <h2>Device Data Overview</h2>
             <table>
                 <thead>
                     <tr>
                         <th>Device ID</th>
                         <th>Status</th>
                         <th>Speed (km/h)</th>
+                        <th>CPU %</th>
+                        <th>RAM %</th>
+                        <th>Detection</th>
                         <th>Last Update</th>
                     </tr>
                 </thead>
@@ -241,8 +295,27 @@
                         <div>
                             <div class="chart-title">${deviceId}</div>
                             <div class="chart-speed" id="speed-${deviceId}">-- km/h</div>
+                            <div class="detection-badge detection-normal" id="detection-${deviceId}">Normal</div>
                         </div>
                         <span class="status-indicator status-unknown" id="status-${deviceId}"></span>
+                    </div>
+                    <div class="telemetry-info" id="telemetry-${deviceId}">
+                        <div class="telemetry-item">
+                            <span class="telemetry-label">CPU:</span>
+                            <span class="telemetry-value" id="cpu-${deviceId}">--%</span>
+                        </div>
+                        <div class="telemetry-item">
+                            <span class="telemetry-label">RAM:</span>
+                            <span class="telemetry-value" id="ram-${deviceId}">--%</span>
+                        </div>
+                        <div class="telemetry-item">
+                            <span class="telemetry-label">Memory:</span>
+                            <span class="telemetry-value" id="memory-${deviceId}">--%</span>
+                        </div>
+                        <div class="telemetry-item">
+                            <span class="telemetry-label">Disk:</span>
+                            <span class="telemetry-value" id="disk-${deviceId}">--%</span>
+                        </div>
                     </div>
                     <div class="chart-container">
                         <canvas id="chart-${deviceId}"></canvas>
@@ -296,7 +369,12 @@
                 deviceData[deviceId] = {
                     speeds: [],
                     timestamps: [],
-                    status: 'unknown'
+                    status: 'unknown',
+                    cpu_usage: undefined,
+                    ram_usage: undefined,
+                    memory_percent: undefined,
+                    disk_percent: undefined,
+                    detection_label: 'normal'
                 };
             }
         }
@@ -376,6 +454,10 @@
                 const data = deviceData[deviceId];
                 const latestSpeed = data.speeds.length > 0 ? data.speeds[data.speeds.length - 1] : '--';
                 const latestTimestamp = data.timestamps.length > 0 ? data.timestamps[data.timestamps.length - 1] : '--';
+                const cpu = data.cpu_usage !== undefined ? data.cpu_usage.toFixed(1) : '--';
+                const ram = data.ram_usage !== undefined ? data.ram_usage.toFixed(1) : '--';
+                const detection = data.detection_label || 'normal';
+                const detectionText = detection.charAt(0).toUpperCase() + detection.slice(1).replace('_', ' ');
                 
                 const row = document.createElement('tr');
                 row.innerHTML = `
@@ -385,19 +467,95 @@
                         ${data.status}
                     </td>
                     <td>${latestSpeed === '--' ? '--' : latestSpeed.toFixed(1)}</td>
+                    <td>${cpu}%</td>
+                    <td>${ram}%</td>
+                    <td>
+                        <span class="detection-badge ${detection === 'normal' ? 'detection-normal' : detection === 'eyes_closed' || detection === 'drowsy' ? 'detection-warning' : 'detection-alert'}">
+                            ${detectionText}
+                        </span>
+                    </td>
                     <td>${latestTimestamp}</td>
                 `;
                 tbody.appendChild(row);
             });
         }
 
+        // Update telemetry display
+        function updateTelemetry(deviceId, data) {
+            const cpuEl = document.getElementById(`cpu-${deviceId}`);
+            const ramEl = document.getElementById(`ram-${deviceId}`);
+            const memoryEl = document.getElementById(`memory-${deviceId}`);
+            const diskEl = document.getElementById(`disk-${deviceId}`);
+            
+            if (cpuEl && data.cpu_usage !== undefined) {
+                cpuEl.textContent = `${data.cpu_usage.toFixed(1)}%`;
+            }
+            if (ramEl && data.ram_usage !== undefined) {
+                ramEl.textContent = `${data.ram_usage.toFixed(1)}%`;
+            }
+            if (memoryEl && data.memory_percent !== undefined) {
+                memoryEl.textContent = `${data.memory_percent.toFixed(1)}%`;
+            }
+            if (diskEl && data.disk_percent !== undefined) {
+                diskEl.textContent = `${data.disk_percent.toFixed(1)}%`;
+            }
+        }
+
+        // Update detection label display
+        function updateDetection(deviceId, detectionLabel) {
+            const badge = document.getElementById(`detection-${deviceId}`);
+            if (!badge) return;
+            
+            const label = detectionLabel || "normal";
+            const labelText = label.charAt(0).toUpperCase() + label.slice(1).replace('_', ' ');
+            
+            // Remove all detection classes
+            badge.className = 'detection-badge';
+            
+            // Add appropriate class based on label
+            if (label === "normal") {
+                badge.classList.add('detection-normal');
+                badge.textContent = 'Normal';
+            } else if (label === "eyes_closed" || label === "drowsy") {
+                badge.classList.add('detection-warning');
+                badge.textContent = labelText;
+            } else {
+                badge.classList.add('detection-alert');
+                badge.textContent = labelText;
+            }
+        }
+
         // Handle latest data from WebSocket
         socket.on('latest_data', (data) => {
             Object.keys(data).forEach(deviceId => {
-                const speed = data[deviceId].speed;
-                const timestamp = data[deviceId].timestamp;
+                const deviceInfo = data[deviceId];
+                const speed = deviceInfo.speed;
+                const timestamp = deviceInfo.timestamp;
+                const detectionLabel = deviceInfo.detection_label;
                 
-                updateChart(deviceId, speed, timestamp);
+                // Store telemetry data
+                if (deviceData[deviceId]) {
+                    if (deviceInfo.cpu_usage !== undefined) deviceData[deviceId].cpu_usage = deviceInfo.cpu_usage;
+                    if (deviceInfo.ram_usage !== undefined) deviceData[deviceId].ram_usage = deviceInfo.ram_usage;
+                    if (deviceInfo.memory_percent !== undefined) deviceData[deviceId].memory_percent = deviceInfo.memory_percent;
+                    if (deviceInfo.disk_percent !== undefined) deviceData[deviceId].disk_percent = deviceInfo.disk_percent;
+                    if (detectionLabel) deviceData[deviceId].detection_label = detectionLabel;
+                }
+                
+                // Update speed chart if speed is available
+                if (speed !== undefined && timestamp) {
+                    updateChart(deviceId, speed, timestamp);
+                }
+                
+                // Update telemetry display
+                updateTelemetry(deviceId, deviceInfo);
+                
+                // Update detection label
+                if (detectionLabel) {
+                    updateDetection(deviceId, detectionLabel);
+                }
+                
+                // Update device status
                 updateDeviceStatus(deviceId, 'online');
             });
             

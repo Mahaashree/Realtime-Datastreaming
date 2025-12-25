@@ -1,0 +1,18 @@
+[project]
+name = "realtime-datastreaming"
+version = "0.1.0"
+description = "Real-time data streaming application"
+requires-python = ">=3.11"
+dependencies = [
+    "paho-mqtt==1.6.1",
+    "influxdb-client==1.38.0",
+    "flask==3.0.0",
+    "flask-socketio==5.3.5",
+    "python-socketio==5.10.0",
+    "python-dotenv==1.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+

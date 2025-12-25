@@ -128,7 +128,7 @@ class MQTTCollector:
             self.connected = True
             logger.info("MQTT Collector connected to broker")
             # Subscribe to all vehicle speed topics
-            topic = "vehicle/speed/+"
+            topic = "device/data/+"
             client.subscribe(topic, qos=1)
             logger.info(f"Subscribed to topic: {topic}")
         else:
@@ -149,33 +149,70 @@ class MQTTCollector:
             # Parse JSON payload
             payload = json.loads(msg.payload.decode())
             device_id = payload.get("device_id")
-            speed = payload.get("speed")
             timestamp = payload.get("timestamp")
+            speed = payload.get("speed")
             
-            if not all([device_id, speed is not None, timestamp]):
+            if not all([device_id, timestamp]):
                 logger.warning(f"Invalid message format: {payload}")
                 return
             
             # Update device status
             self.status_tracker.update_device(device_id)
+
+            point = Point("device_data") \
+                .tag("device_id", device_id)
+
+            if "speed" in payload:
+                point = point.field("speed", float(payload["speed"]))
+
+             # Add telemetry fields
+            if "telemetry" in payload:
+                telemetry = payload["telemetry"]
+                if "cpu_usage" in telemetry:
+                    point = point.field("cpu_usage", float(telemetry["cpu_usage"]))
+                if "ram_usage" in telemetry:
+                    point = point.field("ram_usage", float(telemetry["ram_usage"]))
+                if "memory" in telemetry:
+                    memory = telemetry["memory"]
+                    point = point.field("memory_total", int(memory.get("total", 0))) \
+                            .field("memory_used", int(memory.get("used", 0))) \
+                            .field("memory_available", int(memory.get("available", 0))) \
+                            .field("memory_percent", float(memory.get("percent", 0)))
+                if "disk" in telemetry:
+                    disk = telemetry["disk"]
+                    point = point.field("disk_total", int(disk.get("total", 0))) \
+                            .field("disk_used", int(disk.get("used", 0))) \
+                            .field("disk_free", int(disk.get("free", 0))) \
+                            .field("disk_percent", float(disk.get("percent", 0)))
+                if "network" in telemetry:
+                    network = telemetry["network"]
+                    point = point.field("network_bytes_sent", int(network.get("bytes_sent", 0))) \
+                            .field("network_bytes_recv", int(network.get("bytes_recv", 0)))
+            
+            # Add detection label
+            if "detection" in payload:
+                detection = payload["detection"]
+                point = point.tag("detection_label", detection.get("label", "unknown")) \
+                        .field("detection_confidence", float(detection.get("confidence", 0.0)))
+            
+            # Set timestamp
+            point = point.time(int(timestamp * 1e9), WritePrecision.NS)
             
             # Write to InfluxDB
-            point = Point("vehicle_speed") \
-                .tag("device_id", device_id) \
-                .field("speed", float(speed)) \
-                .time(int(timestamp * 1e9), WritePrecision.NS)
-            
             self.write_api.write(bucket=self.influxdb_bucket, record=point)
             
             self.message_count += 1
+
             if self.message_count % 100 == 0:
                 logger.info(f"Processed {self.message_count} messages")
-            
+        
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse JSON message: {e}")
         except Exception as e:
             logger.error(f"Error processing message: {e}")
-    
+
+                        
+        
     def connect(self):
         """Connect to MQTT broker."""
         try:

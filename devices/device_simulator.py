@@ -13,6 +13,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 from dotenv import load_dotenv
+import psutil
 
 # Load environment variables
 load_dotenv()
@@ -20,7 +21,7 @@ load_dotenv()
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s   - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
@@ -146,7 +147,8 @@ class DeviceSimulator:
         self.broker_host = broker_host
         self.broker_port = broker_port
         self.publish_interval = publish_interval
-        self.topic = f"vehicle/speed/{device_id}"
+        self.detection_simulator = DetectionLabelSimulator()
+        self.topic = f"device/data/{device_id}"
         
         # Initialize components
         self.offline_queue = OfflineQueue(device_id)
@@ -206,13 +208,34 @@ class DeviceSimulator:
                 self.offline_queue.clear_queue()
                 logger.info(f"Device {self.device_id} queue cleared")
     
-    def _publish_speed(self, speed: float):
-        """Publish speed data to MQTT broker."""
+    def _publish_device_data(self, speed: float):
+        """Publish complete device data including telemetry and detections."""
+        
+        # Collect telemetry
+        telemetry = DeviceTelemetry()
+        
+        # Get detection label
+        detection = self.detection_simulator.get_next_label()
+        
+        # Build complete payload
         payload = {
             "device_id": self.device_id,
-            "speed": speed,
             "timestamp": time.time(),
-            "datetime": datetime.now().isoformat()
+            "datetime": datetime.now().isoformat(),
+            
+            # Speed data
+            "speed": speed,
+            
+            # Device telemetry
+            "telemetry": {
+                "cpu_usage": telemetry.get_cpu_usage(),
+                "ram_usage": telemetry.get_ram_usage(),
+                "memory": telemetry.get_memory_info(),
+                "disk": telemetry.get_disk_usage(),
+            },
+            
+            # Detection labels
+            "detection": detection
         }
         
         message = json.dumps(payload)
@@ -221,7 +244,7 @@ class DeviceSimulator:
             try:
                 result = self.client.publish(self.topic, message, qos=1)
                 if result.rc == mqtt.MQTT_ERR_SUCCESS:
-                    logger.debug(f"Device {self.device_id} published speed: {speed} km/h")
+                    logger.debug(f"Device {self.device_id} published data")
                 else:
                     logger.warning(f"Device {self.device_id} publish failed, queueing message")
                     self.offline_queue.add_message(self.topic, message, qos=1)
@@ -229,7 +252,6 @@ class DeviceSimulator:
                 logger.error(f"Device {self.device_id} error publishing: {e}")
                 self.offline_queue.add_message(self.topic, message, qos=1)
         else:
-            # Queue message when disconnected
             self.offline_queue.add_message(self.topic, message, qos=1)
             logger.debug(f"Device {self.device_id} queued message (disconnected)")
     
@@ -259,7 +281,7 @@ class DeviceSimulator:
         while self.running:
             try:
                 speed = self.speed_simulator.get_next_speed()
-                self._publish_speed(speed)
+                self._publish_device_data(speed)
                 
                 # Log queue size periodically
                 queue_size = self.offline_queue.get_queue_size()
@@ -275,6 +297,79 @@ class DeviceSimulator:
                 time.sleep(self.publish_interval)
         
         self.disconnect()
+
+    
+
+class DeviceTelemetry:
+
+    @staticmethod
+    def get_cpu_usage():
+        return psutil.cpu_percent(interval=1)
+
+    @staticmethod
+    def get_ram_usage():
+        memory = psutil.virtual_memory()
+        return memory.percent
+
+    @staticmethod
+    def get_memory_info():
+        memory = psutil.virtual_memory()
+        return {
+            "total": memory.total,
+            "available": memory.available,
+            "used": memory.used,
+            "percent": memory.percent,
+        }
+
+    @staticmethod
+    def get_disk_usage():
+        disk = psutil.disk_usage('/')
+        return {
+            "total": disk.total,
+            "used": disk.used,
+            "free": disk.free,
+            "percent": disk.percent,
+        }
+
+class DetectionLabelSimulator:
+    def __init__(self):
+        self.labels = [
+            "eyes_closed",
+            "distracted",
+            "smoking",
+            "phone_usage",
+            "yawning",
+            "drowsy",
+            "normal"
+        ]
+
+        self.current_label = "normal"
+        self.label_duration = 10
+
+    def get_next_label(self):
+        #90% chance to stay normal
+        if random.random() < 0.9:
+            if self.current_label != "normal":
+                self.label_duration += 1
+                # Return to normal after 3-5 seconds
+                if self.label_duration > random.randint(3, 5):
+                    self.current_label = "normal"
+                    self.label_duration = 0
+        else:
+            # Randomly detect an issue
+            self.current_label = random.choice([
+                "eyes_closed",
+                "distracted", 
+                "smoking",
+                "phone_usage"
+            ])
+            self.label_duration = 0
+        
+        return {
+            "label": self.current_label,
+            "confidence": random.uniform(0.75, 0.99) if self.current_label != "normal" else 1.0,
+            "timestamp": time.time()
+        }
 
 
 def main():

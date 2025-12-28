@@ -220,7 +220,7 @@
     <div class="container">
         <div class="header">
             <h1>🚗 Vehicle Speed Monitoring Dashboard</h1>
-            <p>Real-time data streaming from 10 vehicle devices</p>
+            <p>Real-time data streaming from vehicle devices</p>
             <div class="status-bar" id="statusBar">
                 <!-- Device status indicators will be inserted here -->
             </div>
@@ -278,12 +278,13 @@
             document.getElementById('connectionText').textContent = 'Disconnected';
         });
 
-        // Initialize charts for 10 devices
+        // Initialize charts for devices (supports up to 100 devices)
         function initializeCharts() {
             const chartsGrid = document.getElementById('chartsGrid');
+            const maxDevices = 100;  // Support up to 100 devices
             
-            for (let i = 1; i <= 10; i++) {
-                const deviceId = `vehicle_${String(i).padStart(2, '0')}`;
+            for (let i = 1; i <= maxDevices; i++) {
+                const deviceId = `vehicle_${String(i).padStart(3, '0')}`;
                 
                 // Create chart card
                 const card = document.createElement('div');
@@ -429,8 +430,9 @@
             const statusBar = document.getElementById('statusBar');
             statusBar.innerHTML = '';
             
-            for (let i = 1; i <= 10; i++) {
-                const deviceId = `vehicle_${String(i).padStart(2, '0')}`;
+            const maxDevices = 100;  // Support up to 100 devices
+            for (let i = 1; i <= maxDevices; i++) {
+                const deviceId = `vehicle_${String(i).padStart(3, '0')}`;
                 const status = deviceData[deviceId]?.status || 'unknown';
                 
                 const item = document.createElement('div');

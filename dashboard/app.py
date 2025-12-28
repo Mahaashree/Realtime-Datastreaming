@@ -393,6 +393,7 @@ def broadcast_latest_data():
                 from(bucket: "{INFLUXDB_BUCKET}")
                   |> range(start: -30s)
                   |> filter(fn: (r) => (r["_measurement"] == "device_data"))
+                  |> filter(fn: (r) => r["collector"] == "telegraf" or r["collector"] == "python")
                   |> group(columns: ["device_id", "_field"])
                   |> last()
                 '''

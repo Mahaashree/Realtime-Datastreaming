@@ -1,5 +1,5 @@
 """
-Script to run 10 device simulators concurrently.
+Script to run multiple device simulators concurrently.
 Each device runs in a separate process to simulate independent devices.
 """
 
@@ -18,6 +18,7 @@ broker_host = os.getenv("MQTT_BROKER_HOST", "localhost")
 broker_port = os.getenv("MQTT_BROKER_PORT", "1883")
 
 # Configuration
+NUM_DEVICES = int(os.getenv("NUM_DEVICES", "50"))  # Default to 50, can set to 100 via env var
 SHOW_LOGS = os.getenv("SHOW_DEVICE_LOGS", "true").lower() == "true"  # Set to "false" to hide logs
 LOG_PREFIX = os.getenv("LOG_PREFIX", "true").lower() == "true"  # Show device ID prefix in logs
 
@@ -110,7 +111,7 @@ def start_device(device_id, restart_count=0):
 
 
 def main():
-    """Start 10 device simulators."""
+    """Start device simulators (configurable count)."""
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
@@ -118,22 +119,23 @@ def main():
     print("Vehicle Device Simulator Manager")
     print("=" * 70)
     print(f"MQTT Broker: {broker_host}:{broker_port}")
+    print(f"Number of Devices: {NUM_DEVICES}")
     print(f"Logging: {'Enabled' if SHOW_LOGS else 'Disabled'}")
     print(f"Log Prefix: {'Enabled' if LOG_PREFIX else 'Disabled'}")
     print("Press Ctrl+C to stop all devices")
     print("=" * 70)
     print()
     
-    # Start 10 device processes
-    print("Starting 10 device simulators...")
-    for i in range(1, 11):
-        device_id = f"vehicle_{i:02d}"
-        print(f"  [{i:2}/10] Starting {device_id}...", end=" ", flush=True)
+    # Start device processes
+    print(f"Starting {NUM_DEVICES} device simulators...")
+    for i in range(1, NUM_DEVICES + 1):
+        device_id = f"vehicle_{i:03d}"  # Use 3 digits for 100+ devices
+        print(f"  [{i:3}/{NUM_DEVICES}] Starting {device_id}...", end=" ", flush=True)
         
         try:
             process = start_device(device_id)
-            # Give it a moment to connect
-            time.sleep(0.3)
+            # Give it a moment to connect (reduced delay for faster startup with many devices)
+            time.sleep(0.1)
             
             # Check if process is still running (didn't crash immediately)
             if process.poll() is None:
@@ -143,7 +145,11 @@ def main():
         except Exception as e:
             print(f"✗ Error: {e}")
         
-        time.sleep(0.2)  # Small delay between starting devices
+        # Reduced delay for faster startup with many devices
+        if i % 10 == 0:
+            time.sleep(0.1)  # Small pause every 10 devices
+        else:
+            time.sleep(0.05)  # Minimal delay between devices
     
     print()
     print("=" * 70)
@@ -183,7 +189,7 @@ def main():
             # Periodic status update
             if current_time - last_status_time >= status_interval:
                 running_count = sum(1 for info in process_info.values() if info["process"].poll() is None)
-                print(f"\n📊 Status: {running_count}/10 devices running")
+                print(f"\n📊 Status: {running_count}/{NUM_DEVICES} devices running")
                 last_status_time = current_time
             
             time.sleep(5)  # Check every 5 seconds

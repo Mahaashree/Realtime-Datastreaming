@@ -154,11 +154,11 @@ def get_devices_status():
     
     try:
         # Query last seen timestamp for each device
-        # Try both measurement names (Python collector uses "vehicle_speed", Telegraf uses "mqtt_consumer")
+        # Support all measurement names: device_data (Python collector), vehicle_speed (legacy), mqtt_consumer (Telegraf)
         query = f'''
         from(bucket: "{INFLUXDB_BUCKET}")
           |> range(start: -1h)
-          |> filter(fn: (r) => r["_measurement"] == "vehicle_speed" or r["_measurement"] == "mqtt_consumer")
+          |> filter(fn: (r) => r["_measurement"] == "device_data" or r["_measurement"] == "vehicle_speed" or r["_measurement"] == "mqtt_consumer")
           |> filter(fn: (r) => r["_field"] == "speed")
           |> group(columns: ["device_id"])
           |> last()
@@ -208,7 +208,7 @@ def get_device_latest(device_id):
         query = f'''
         from(bucket: "{INFLUXDB_BUCKET}")
           |> range(start: -1h)
-          |> filter(fn: (r) => (r["_measurement"] == "vehicle_speed" or r["_measurement"] == "mqtt_consumer") and r["device_id"] == "{device_id}" and r["_field"] == "speed")
+          |> filter(fn: (r) => (r["_measurement"] == "device_data" or r["_measurement"] == "vehicle_speed" or r["_measurement"] == "mqtt_consumer") and r["device_id"] == "{device_id}" and r["_field"] == "speed")
           |> last()
         '''
         
@@ -306,7 +306,7 @@ def get_device_history(device_id):
         query = f'''
         from(bucket: "{INFLUXDB_BUCKET}")
           |> range(start: -{duration})
-          |> filter(fn: (r) => (r["_measurement"] == "vehicle_speed" or r["_measurement"] == "mqtt_consumer") and r["device_id"] == "{device_id}" and r["_field"] == "speed")
+          |> filter(fn: (r) => (r["_measurement"] == "device_data" or r["_measurement"] == "vehicle_speed" or r["_measurement"] == "mqtt_consumer") and r["device_id"] == "{device_id}" and r["_field"] == "speed")
           |> aggregateWindow(every: 1s, fn: mean, createEmpty: false)
           |> yield(name: "mean")
         '''

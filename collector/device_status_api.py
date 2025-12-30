@@ -35,11 +35,11 @@ def get_devices_status():
     """Get status of all devices based on InfluxDB data."""
     try:
         # Query last seen timestamp for each device
-        # Adjust measurement name based on your Telegraf configuration
+        # Support all measurement names: device_data (Python collector), vehicle_speed (legacy), mqtt_consumer (Telegraf)
         query = f'''
         from(bucket: "{INFLUXDB_BUCKET}")
           |> range(start: -1h)
-          |> filter(fn: (r) => r["_measurement"] == "mqtt_consumer")
+          |> filter(fn: (r) => r["_measurement"] == "device_data" or r["_measurement"] == "vehicle_speed" or r["_measurement"] == "mqtt_consumer")
           |> filter(fn: (r) => r["_field"] == "speed")
           |> group(columns: ["device_id"])
           |> last()

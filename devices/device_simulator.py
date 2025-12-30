@@ -18,6 +18,15 @@ import psutil
 # Load environment variables
 load_dotenv()
 
+# MQTT Security Configuration
+MQTT_USE_TLS = os.getenv("MQTT_USE_TLS", "false").lower() == "true"
+MQTT_TLS_INSECURE = os.getenv("MQTT_TLS_INSECURE", "false").lower() == "true"  # For self-signed certs
+MQTT_CA_CERTS = os.getenv("MQTT_CA_CERTS", None)  # Path to CA certificate
+MQTT_CERTFILE = os.getenv("MQTT_CERTFILE", None)  # Path to client certificate (optional)
+MQTT_KEYFILE = os.getenv("MQTT_KEYFILE", None)  # Path to client private key (optional)
+MQTT_USERNAME = os.getenv("MQTT_USERNAME", None)
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", None)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -154,31 +163,85 @@ class DeviceSimulator:
         self.offline_queue = OfflineQueue(device_id)
         self.speed_simulator = VehicleSpeedSimulator()
         
-        # MQTT client setup
-        self.client = mqtt.Client(client_id=f"device_{device_id}", clean_session=False)
+        # MQTT client setup with persistent session (best practice for reliability)
+        self.client = mqtt.Client(
+            client_id=f"device_{device_id}",
+            clean_session=False  # Persistent session for message retention
+        )
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
         self.client.on_publish = self._on_publish
         
+        # Configure TLS if enabled
+        if MQTT_USE_TLS:
+            try:
+                # TLS configuration
+                if MQTT_CA_CERTS:
+                    # Use custom CA certificate
+                    self.client.tls_set(
+                        ca_certs=MQTT_CA_CERTS,
+                        certfile=MQTT_CERTFILE,
+                        keyfile=MQTT_KEYFILE,
+                        cert_reqs=mqtt.ssl.CERT_REQUIRED if not MQTT_TLS_INSECURE else mqtt.ssl.CERT_NONE
+                    )
+                else:
+                    # Use system CA certificates
+                    self.client.tls_set(
+                        certfile=MQTT_CERTFILE,
+                        keyfile=MQTT_KEYFILE,
+                        cert_reqs=mqtt.ssl.CERT_REQUIRED if not MQTT_TLS_INSECURE else mqtt.ssl.CERT_NONE
+                    )
+                
+                # Allow self-signed certificates in development
+                if MQTT_TLS_INSECURE:
+                    self.client.tls_insecure_set(True)
+                else:
+                    self.client.tls_insecure_set(False)
+            except Exception as e:
+                logger.error(f"Device {self.device_id} TLS configuration error: {e}")
+                raise
+        
+        # Configure authentication if provided
+        if MQTT_USERNAME and MQTT_PASSWORD:
+            self.client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+        
+        # Enable automatic reconnection with exponential backoff (best practice)
+        self.client.reconnect_delay_set(min_delay=1, max_delay=120)
+        
         self.connected = False
         self.running = False
+        self.last_connection_attempt = 0
+        self.reconnect_interval = 1  # Start with 1 second
     
     def _on_connect(self, client, userdata, flags, rc):
         """Callback when MQTT client connects."""
         if rc == 0:
             self.connected = True
-            logger.info(f"Device {self.device_id} connected to MQTT broker")
+            self.reconnect_interval = 1  # Reset reconnect interval on successful connection
+            protocol = "TLS" if MQTT_USE_TLS else "TCP"
+            logger.info(f"Device {self.device_id} connected to MQTT broker ({protocol})")
             # Flush offline queue
             self._flush_queue()
         else:
-            logger.error(f"Device {self.device_id} failed to connect, return code {rc}")
+            error_messages = {
+                1: "incorrect protocol version",
+                2: "invalid client identifier",
+                3: "server unavailable",
+                4: "bad username or password",
+                5: "not authorized"
+            }
+            error_msg = error_messages.get(rc, f"unknown error ({rc})")
+            logger.error(f"Device {self.device_id} failed to connect: {error_msg}")
             self.connected = False
+            # Exponential backoff for reconnection
+            self.reconnect_interval = min(self.reconnect_interval * 2, 120)
     
     def _on_disconnect(self, client, userdata, rc):
         """Callback when MQTT client disconnects."""
         self.connected = False
         if rc != 0:
-            logger.warning(f"Device {self.device_id} unexpectedly disconnected")
+            logger.warning(f"Device {self.device_id} unexpectedly disconnected (rc={rc}). Will auto-reconnect...")
+            # loop_start() with reconnect_delay_set will automatically reconnect
         else:
             logger.info(f"Device {self.device_id} disconnected")
     
@@ -191,33 +254,57 @@ class DeviceSimulator:
         messages = self.offline_queue.get_all_messages()
         if messages:
             logger.info(f"Device {self.device_id} flushing {len(messages)} queued messages")
-            for topic, payload, qos in messages:
+            flushed_count = 0
+            failed_count = 0
+            
+            # Publish in batches to avoid overwhelming broker
+            batch_size = 100
+            for i, (topic, payload, qos) in enumerate(messages):
+                # Check connection is still alive
+                if not self.connected:
+                    logger.warning(f"Device {self.device_id} connection lost during queue flush")
+                    break
+                
                 try:
+                    # Publish with QoS 1 (at least once delivery - best practice)
                     result = self.client.publish(topic, payload, qos=qos)
                     if result.rc == mqtt.MQTT_ERR_SUCCESS:
-                        time.sleep(0.01)  # Small delay to avoid overwhelming broker
+                        flushed_count += 1
+                        # Small delay every 10 messages to avoid overwhelming broker
+                        if (i + 1) % 10 == 0:
+                            time.sleep(0.01)
                     else:
-                        logger.error(f"Failed to publish queued message: {result.rc}")
-                        break  # Stop if publish fails
+                        logger.warning(f"Failed to publish queued message: {result.rc}")
+                        failed_count += 1
+                        # Don't break - continue trying to flush more messages
                 except Exception as e:
                     logger.error(f"Error publishing queued message: {e}")
-                    break
+                    failed_count += 1
+                    # Continue with next message
             
-            # Clear queue only if all messages were sent
-            if self.connected:
-                self.offline_queue.clear_queue()
-                logger.info(f"Device {self.device_id} queue cleared")
+            # Clear successfully flushed messages
+            if flushed_count > 0 and self.connected:
+                # Remove only the messages that were successfully published
+                # For simplicity, clear all if most were flushed
+                if failed_count == 0 or (flushed_count / len(messages)) > 0.9:
+                    self.offline_queue.clear_queue()
+                    logger.info(f"Device {self.device_id} queue cleared ({flushed_count} messages flushed)")
+                else:
+                    logger.warning(f"Device {self.device_id} partially flushed queue: {flushed_count} flushed, {failed_count} failed")
     
     def _publish_device_data(self, speed: float):
-        """Publish complete device data including telemetry and detections."""
+        """Publish complete device data including telemetry and detections (flat JSON structure)."""
         
         # Collect telemetry
         telemetry = DeviceTelemetry()
+        memory = telemetry.get_memory_info()
+        disk = telemetry.get_disk_usage()
+        network = psutil.net_io_counters()
         
         # Get detection label
         detection = self.detection_simulator.get_next_label()
         
-        # Build complete payload
+        # Build flat payload (no nested objects for better Telegraf performance)
         payload = {
             "device_id": self.device_id,
             "timestamp": time.time(),
@@ -226,44 +313,85 @@ class DeviceSimulator:
             # Speed data
             "speed": speed,
             
-            # Device telemetry
-            "telemetry": {
-                "cpu_usage": telemetry.get_cpu_usage(),
-                "ram_usage": telemetry.get_ram_usage(),
-                "memory": telemetry.get_memory_info(),
-                "disk": telemetry.get_disk_usage(),
-            },
+            # Device telemetry (flattened)
+            "cpu_usage": telemetry.get_cpu_usage(),
+            "ram_usage": telemetry.get_ram_usage(),
             
-            # Detection labels
-            "detection": detection
+            # Memory (flattened)
+            "memory_total": memory["total"],
+            "memory_used": memory["used"],
+            "memory_available": memory["available"],
+            "memory_percent": memory["percent"],
+            
+            # Disk (flattened)
+            "disk_total": disk["total"],
+            "disk_used": disk["used"],
+            "disk_free": disk["free"],
+            "disk_percent": disk["percent"],
+            
+            # Network (flattened)
+            "network_bytes_sent": network.bytes_sent,
+            "network_bytes_recv": network.bytes_recv,
+            
+            # Detection labels (flattened)
+            "detection_label": detection["label"],
+            "detection_confidence": detection["confidence"],
+            "detection_timestamp": detection["timestamp"]
         }
         
         message = json.dumps(payload)
         
+        # Check if connected (flag + verify by attempting publish)
         if self.connected:
             try:
+                # Publish with QoS 1 (at least once delivery - best practice)
                 result = self.client.publish(self.topic, message, qos=1)
                 if result.rc == mqtt.MQTT_ERR_SUCCESS:
                     logger.debug(f"Device {self.device_id} published data")
+                elif result.rc == mqtt.MQTT_ERR_NO_CONN:
+                    # Not connected - update flag and queue
+                    logger.warning(f"Device {self.device_id} not connected, queueing message")
+                    self.connected = False
+                    self.offline_queue.add_message(self.topic, message, qos=1)
                 else:
-                    logger.warning(f"Device {self.device_id} publish failed, queueing message")
+                    logger.warning(f"Device {self.device_id} publish failed (rc={result.rc}), queueing message")
                     self.offline_queue.add_message(self.topic, message, qos=1)
             except Exception as e:
                 logger.error(f"Device {self.device_id} error publishing: {e}")
                 self.offline_queue.add_message(self.topic, message, qos=1)
+                self.connected = False
         else:
+            # Not connected - queue message
             self.offline_queue.add_message(self.topic, message, qos=1)
             logger.debug(f"Device {self.device_id} queued message (disconnected)")
     
     def connect(self):
-        """Connect to MQTT broker."""
+        """Connect to MQTT broker with robust error handling."""
         try:
-            logger.info(f"Device {self.device_id} connecting to {self.broker_host}:{self.broker_port}")
+            # Don't reconnect too frequently
+            current_time = time.time()
+            if current_time - self.last_connection_attempt < self.reconnect_interval:
+                return  # Too soon to retry
+            
+            self.last_connection_attempt = current_time
+            protocol = "TLS" if MQTT_USE_TLS else "TCP"
+            logger.info(f"Device {self.device_id} connecting to {self.broker_host}:{self.broker_port} ({protocol})")
+            
+            # Connect with keepalive (60 seconds - best practice)
+            # Broker will disconnect if no keepalive for 1.5x keepalive time (90 seconds)
             self.client.connect(self.broker_host, self.broker_port, keepalive=60)
+            
+            # Start network loop (handles keepalive and auto-reconnect)
             self.client.loop_start()
+            
+            # Wait a moment for connection to establish
+            time.sleep(0.5)
+            
         except Exception as e:
             logger.error(f"Device {self.device_id} connection error: {e}")
             self.connected = False
+            # Exponential backoff
+            self.reconnect_interval = min(self.reconnect_interval * 2, 120)
     
     def disconnect(self):
         """Disconnect from MQTT broker."""
@@ -274,19 +402,27 @@ class DeviceSimulator:
         logger.info(f"Device {self.device_id} stopped")
     
     def run(self):
-        """Main loop to generate and publish speed data."""
+        """Main loop to generate and publish speed data with robust reconnection."""
         self.running = True
         logger.info(f"Device {self.device_id} started, publishing every {self.publish_interval}s")
         
         while self.running:
             try:
+                # Ensure connection is maintained - reconnect if needed
+                if not self.connected:
+                    # Try to reconnect if not connected
+                    self.connect()
+                    # Give it a moment to connect
+                    time.sleep(1)
+                
                 speed = self.speed_simulator.get_next_speed()
                 self._publish_device_data(speed)
                 
-                # Log queue size periodically
+                # Log queue size periodically (only if queue is growing)
                 queue_size = self.offline_queue.get_queue_size()
                 if queue_size > 0:
-                    logger.info(f"Device {self.device_id} queue size: {queue_size}")
+                    if queue_size % 1000 == 0 or queue_size > 5000:  # Log every 1000 or if > 5000
+                        logger.info(f"Device {self.device_id} queue size: {queue_size}")
                 
                 time.sleep(self.publish_interval)
             except KeyboardInterrupt:
@@ -304,7 +440,8 @@ class DeviceTelemetry:
 
     @staticmethod
     def get_cpu_usage():
-        return psutil.cpu_percent(interval=1)
+        #return psutil.cpu_percent(interval=1)
+        return psutil.cpu_percent(interval = None) #reduces blockage
 
     @staticmethod
     def get_ram_usage():

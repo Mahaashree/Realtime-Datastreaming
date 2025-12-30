@@ -29,3 +29,11 @@ devices/queues/
 # Logs
 *.log
 
+# TLS Certificates and Keys 
+docker/mosquitto/config/certs/*.key
+docker/mosquitto/config/certs/*.crt
+docker/mosquitto/config/certs/*.srl
+docker/mosquitto/config/certs/*.csr
+docker/mosquitto/config/certs/*.conf
+docker/mosquitto/config/certs/*.pem
+

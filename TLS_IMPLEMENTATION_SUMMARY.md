@@ -3,6 +3,7 @@
 ## ✅ What Was Implemented
 
 ### 1. **MQTT Collector TLS Support** (`collector/mqtt_collector.py`)
+
 - ✅ TLS encryption with configurable CA certificates
 - ✅ Support for self-signed certificates (development mode)
 - ✅ Username/password authentication
@@ -13,6 +14,7 @@
 - ✅ Better error messages for connection failures
 
 ### 2. **Device Simulator TLS Support** (`devices/device_simulator.py`)
+
 - ✅ TLS encryption with configurable CA certificates
 - ✅ Support for self-signed certificates (development mode)
 - ✅ Username/password authentication
@@ -23,6 +25,7 @@
 - ✅ Better error messages for connection failures
 
 ### 3. **Mosquitto Configuration** (`docker/mosquitto/config/mosquitto.conf`)
+
 - ✅ Dual listener support (1883 for plain TCP, 8883 for TLS)
 - ✅ Connection limits and settings (best practices)
 - ✅ Message queue limits
@@ -30,18 +33,21 @@
 - ✅ Comments for easy TLS enablement
 
 ### 4. **Certificate Generation Script** (`docker/mosquitto/generate_certs.sh`)
+
 - ✅ Automated self-signed certificate generation
 - ✅ CA certificate, server certificate, and keys
 - ✅ Proper file permissions
 - ✅ Subject Alternative Names (SAN) for localhost
 
 ### 5. **Environment Variable Support**
+
 - ✅ Updated `env.example` with TLS options
 - ✅ Updated `env.example.device` with TLS options
 - ✅ Updated `env.example.universal` with TLS options
 - ✅ All TLS settings are optional (backward compatible)
 
 ### 6. **Documentation**
+
 - ✅ `MQTT_TLS_SETUP.md` - Complete setup guide
 - ✅ Troubleshooting section
 - ✅ Production recommendations
@@ -49,16 +55,16 @@
 
 ## 🔒 MQTT Best Practices Implemented
 
-| Practice | Implementation | Status |
-|----------|---------------|--------|
-| **Persistent Sessions** | `clean_session=False` | ✅ |
-| **QoS 1** | All publishes/subscribes use QoS 1 | ✅ |
-| **Keepalive** | 60 seconds | ✅ |
-| **Auto-Reconnect** | Exponential backoff (1s-120s) | ✅ |
-| **TLS Encryption** | Configurable TLS support | ✅ |
-| **Authentication** | Username/password support | ✅ |
-| **Offline Queue** | SQLite-based queue (devices) | ✅ |
-| **Error Handling** | Comprehensive error messages | ✅ |
+| Practice                | Implementation                     | Status |
+| ----------------------- | ---------------------------------- | ------ |
+| **Persistent Sessions** | `clean_session=False`              | ✅     |
+| **QoS 1**               | All publishes/subscribes use QoS 1 | ✅     |
+| **Keepalive**           | 60 seconds                         | ✅     |
+| **Auto-Reconnect**      | Exponential backoff (1s-120s)      | ✅     |
+| **TLS Encryption**      | Configurable TLS support           | ✅     |
+| **Authentication**      | Username/password support          | ✅     |
+| **Offline Queue**       | SQLite-based queue (devices)       | ✅     |
+| **Error Handling**      | Comprehensive error messages       | ✅     |
 
 ## 📝 Usage Examples
 
@@ -98,12 +104,14 @@ MQTT_USE_TLS=false
 ## 🚀 Quick Start
 
 1. **Generate certificates (development):**
+
    ```bash
    cd docker/mosquitto
    ./generate_certs.sh
    ```
 
 2. **Enable TLS in Mosquitto config:**
+
    ```conf
    listener 8883
    allow_anonymous false
@@ -114,6 +122,7 @@ MQTT_USE_TLS=false
    ```
 
 3. **Update `.env` file:**
+
    ```env
    MQTT_BROKER_PORT=8883
    MQTT_USE_TLS=true
@@ -143,6 +152,7 @@ MQTT_USE_TLS=false
 ## 🎯 Next Steps
 
 1. **For Development:**
+
    - Generate self-signed certificates
    - Enable TLS in Mosquitto config
    - Set `MQTT_TLS_INSECURE=true` in `.env`
@@ -159,5 +169,3 @@ MQTT_USE_TLS=false
 - **Setup Guide:** `MQTT_TLS_SETUP.md`
 - **Environment Examples:** `env.example`, `env.example.device`, `env.example.universal`
 - **Mosquitto Config:** `docker/mosquitto/config/mosquitto.conf`
-
-

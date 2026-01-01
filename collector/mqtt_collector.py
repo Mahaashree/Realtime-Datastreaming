@@ -156,7 +156,7 @@ class MQTTCollector:
             if not device_id:
                 print("⚠️  Warning: Message missing device_id")
                 return
-
+            
             # Create InfluxDB point
             point = Point("device_data") \
                 .tag("device_id", device_id) \
@@ -243,12 +243,12 @@ class MQTTCollector:
             
             # Write to InfluxDB (batched - will flush every 1 second or when batch_size=500)
             try:
-                self.write_api.write(bucket=INFLUXDB_BUCKET, record=point)
-                self.message_count += 1
-                
+            self.write_api.write(bucket=INFLUXDB_BUCKET, record=point)
+            self.message_count += 1
+            
                 # Log progress every 100 messages
-                if self.message_count % 100 == 0:
-                    print(f"📊 Processed {self.message_count} messages")
+            if self.message_count % 100 == 0:
+                print(f"📊 Processed {self.message_count} messages")
             except Exception as write_error:
                 print(f"❌ Error writing to InfluxDB: {write_error}")
                 import traceback

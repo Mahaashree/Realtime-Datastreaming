@@ -399,6 +399,7 @@ class DeviceSimulator:
         if self.connected:
             self.client.loop_stop()
             self.client.disconnect()
+        
         logger.info(f"Device {self.device_id} stopped")
     
     def run(self):
@@ -423,7 +424,8 @@ class DeviceSimulator:
                 if queue_size > 0:
                     if queue_size % 1000 == 0 or queue_size > 5000:  # Log every 1000 or if > 5000
                         logger.info(f"Device {self.device_id} queue size: {queue_size}")
-                
+                else:
+                    logger.info(f"Device {self.device_id} queue size: {queue_size}")
                 time.sleep(self.publish_interval)
             except KeyboardInterrupt:
                 logger.info(f"Device {self.device_id} interrupted by user")

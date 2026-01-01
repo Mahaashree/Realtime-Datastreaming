@@ -117,17 +117,17 @@ try:
     query = '''
     from(bucket: "vehicle-data")
       |> range(start: 1970-01-01T00:00:00Z)
-      |> filter(fn: (r) => r["_measurement"] == "device_data")
+              |> filter(fn: (r) => r["_measurement"] == "device_data")
       |> filter(fn: (r) => r["device_id"] == "e2e_test_001")
       |> filter(fn: (r) => r["_field"] == "speed")
       |> sort(columns: ["_time"], desc: true)
       |> limit(n: 1)
-    '''
+            '''
     
     result = query_api.query(query)
     found = False
-    for table in result:
-        for record in table.records:
+            for table in result:
+                for record in table.records:
             print(f'      ✅ FOUND speed field in InfluxDB!')
             print(f'         Speed: {record.get_value()}')
             print(f'         Time: {record.get_time()}')
@@ -145,7 +145,7 @@ try:
         print(f'      → Write may have failed silently')
         print(f'      → Check collector logs for errors')
         print(f'      → Verify InfluxDB connection/auth')
-    else:
+            else:
         print(f'      ❌ Write succeeded but query returned no results')
         print(f'      → Possible issues:')
         print(f'         - Timestamp mismatch (data outside query range)')
@@ -153,9 +153,9 @@ try:
         print(f'         - Data not yet queryable (indexing delay)')
     
     influx_client.close()
-except Exception as e:
+        except Exception as e:
     print(f'   ❌ InfluxDB query failed: {e}')
-    import traceback
-    traceback.print_exc()
-
+            import traceback
+            traceback.print_exc()
+    
 print('\n✅ Test complete!')

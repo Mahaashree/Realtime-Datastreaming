@@ -165,6 +165,10 @@ class MQTTCollector:
             # Store collector receive time as a field (for latency calculation)
             point = point.field("collector_receive_time", float(collector_receive_time))
             
+            # Store publish timestamp from payload (for end-to-end latency calculation)
+            if "timestamp" in payload:
+                point = point.field("publish_timestamp", float(payload["timestamp"]))
+            
             # Add speed field if present
             if "speed" in payload:
                 point = point.field("speed", float(payload["speed"]))

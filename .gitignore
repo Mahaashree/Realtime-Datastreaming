@@ -37,3 +37,7 @@ docker/mosquitto/config/certs/*.csr
 docker/mosquitto/config/certs/*.conf
 docker/mosquitto/config/certs/*.pem
 
+# Latency data and reports
+monitoring/latency_data.json
+monitoring/latency_report_*.png
+

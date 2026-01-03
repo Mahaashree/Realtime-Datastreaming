@@ -11,7 +11,51 @@ from influxdb_client import InfluxDBClient
 from dotenv import load_dotenv
 import statistics
 
-load_dotenv()
+# Load .env from parent directory
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
+
+def check_fields_exist(duration='5m'):
+    """Check what fields exist in InfluxDB."""
+    client = InfluxDBClient(
+        url=os.getenv('INFLUXDB_URL', 'http://localhost:8086'),
+        token=os.getenv('INFLUXDB_TOKEN'),
+        org=os.getenv('INFLUXDB_ORG', 'my-org')
+    )
+    query_api = client.query_api()
+    bucket = os.getenv('INFLUXDB_BUCKET', 'vehicle-data')
+    
+    # Check what fields exist
+    query_fields = f'''
+    from(bucket: "{bucket}")
+      |> range(start: -{duration})
+      |> filter(fn: (r) => r["_measurement"] == "device_data")
+      |> group(columns: ["_field"])
+      |> distinct(column: "_field")
+    '''
+    
+    result = query_api.query(query_fields)
+    fields = []
+    for table in result:
+        for record in table.records:
+            fields.append(record.get_value())
+    
+    # Check total count
+    query_count = f'''
+    from(bucket: "{bucket}")
+      |> range(start: -{duration})
+      |> filter(fn: (r) => r["_measurement"] == "device_data")
+      |> count()
+    '''
+    
+    result_count = query_api.query(query_count)
+    count = 0
+    for table in result_count:
+        for record in table.records:
+            count = record.get_value()
+    
+    client.close()
+    
+    return fields, count
 
 def get_latency_stats(duration='5m'):
     """Calculate end-to-end latency statistics."""
@@ -76,14 +120,41 @@ def print_latency_report():
     print("=" * 70)
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
     
+    # First check what fields exist
+    try:
+        fields, count = check_fields_exist('5m')
+        print(f"📊 Data in last 5 minutes: {count} records")
+        if fields:
+            print(f"📋 Available fields: {', '.join(sorted(fields))}")
+        print()
+        
+        if count == 0:
+            print("❌ No data found in last 5 minutes.")
+            print("   → Make sure devices are publishing")
+            print("   → Make sure collector is running")
+            return
+        
+        if "publish_timestamp" not in fields:
+            print("⚠️  publish_timestamp field not found!")
+            print("   → The collector needs to be restarted to pick up the new code")
+            print("   → Steps:")
+            print("     1. Stop the current collector (Ctrl+C)")
+            print("     2. Restart: python collector/mqtt_collector.py")
+            print("     3. Wait 10-20 seconds for new data to be written")
+            print("     4. Run this script again")
+            return
+    except Exception as e:
+        print(f"❌ Error connecting to InfluxDB: {e}")
+        print("   → Make sure InfluxDB is running")
+        print("   → Check INFLUXDB_URL in .env file")
+        return
+    
     stats = get_latency_stats('5m')
     
     if not stats:
-        print("❌ No data found. Make sure:")
-        print("   - Devices are publishing")
-        print("   - Collector is running")
-        print("   - Data has been written in last 5 minutes")
-        print("   - Collector has been updated to store publish_timestamp")
+        print("❌ No latency data found (publish_timestamp field exists but no valid latencies).")
+        print("   → This might indicate clock sync issues")
+        print("   → Or data is too old (>60s latency)")
         return
     
     print(f"📊 Sample Size: {stats['count']} messages (last 5 minutes)\n")
@@ -110,4 +181,5 @@ def print_latency_report():
 
 if __name__ == '__main__':
     print_latency_report()
+
 

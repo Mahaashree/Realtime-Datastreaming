@@ -41,4 +41,15 @@ docker/mosquitto/config/certs/*.pem
 monitoring/latency_data.json
 monitoring/latency_report_*.png
 
+# Test results and data
+testing/results/
+testing/*.json
+
+# Docker runtime data
+docker/mosquitto/data/
+docker/mosquitto/log/
+
+# Development/utility scripts (optional - remove if not needed)
+# check_*.py
+# DELETE_*.py
 

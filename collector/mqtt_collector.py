@@ -1,12 +1,14 @@
 """
 MQTT Collector - Subscribes to MQTT messages and writes to InfluxDB
+Multi-threaded implementation for high-throughput message processing
 """
 import json
 import time
 import os
-from datetime import datetime
+import threading
+from queue import Queue, Full, Empty
+from concurrent.futures import ThreadPoolExecutor
 from influxdb_client import InfluxDBClient, Point
-from influxdb_client.client.write_api import SYNCHRONOUS
 from influxdb_client.client.write_api import WriteOptions
 import paho.mqtt.client as mqtt
 from dotenv import load_dotenv
@@ -32,6 +34,10 @@ INFLUXDB_URL = os.getenv("INFLUXDB_URL", "http://localhost:8086")
 INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN")
 INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "my-org")
 INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "vehicle-data")
+
+# Threading Configuration
+NUM_WORKER_THREADS = int(os.getenv("COLLECTOR_WORKER_THREADS", "4"))  # Number of worker threads
+MAX_QUEUE_SIZE = int(os.getenv("COLLECTOR_MAX_QUEUE_SIZE", "10000"))  # Maximum queue size
 
 class MQTTCollector:
     def __init__(self):
@@ -121,7 +127,19 @@ class MQTTCollector:
         # Enable automatic reconnection with exponential backoff (best practice)
         self.mqtt_client.reconnect_delay_set(min_delay=1, max_delay=120)
         
+        # Threading components for multi-threaded processing
+        self.message_queue = Queue(maxsize=MAX_QUEUE_SIZE)
+        self.executor = ThreadPoolExecutor(max_workers=NUM_WORKER_THREADS, thread_name_prefix="collector-worker")
+        self.shutdown_event = threading.Event()
+        
+        # Thread-safe counters
         self.message_count = 0
+        self.error_count = 0
+        self.processed_count = 0
+        self.count_lock = threading.Lock()
+        
+        # Start worker threads
+        self._start_workers()
         
     def _on_connect(self, client, userdata, flags, rc):
         """Callback when MQTT client connects."""
@@ -145,17 +163,40 @@ class MQTTCollector:
             print(f"❌ Failed to connect to MQTT broker: {error_msg}")
     
     def _on_message(self, client, userdata, msg):
-        """Callback when MQTT message is received."""
+        """Callback when MQTT message is received - enqueues message for processing."""
         try:
             # Record when collector received the message (for latency tracking)
             collector_receive_time = time.time()
             
-            payload = json.loads(msg.payload.decode())
+            # Enqueue message for processing by worker threads
+            # This keeps the callback lightweight and non-blocking
+            try:
+                self.message_queue.put_nowait({
+                    'payload': msg.payload,
+                    'collector_receive_time': collector_receive_time,
+                    'topic': msg.topic
+                })
+            except Full:
+                # Queue is full - increment error count
+                with self.count_lock:
+                    self.error_count += 1
+                print(f"⚠️  Warning: Message queue full, dropping message. Queue size: {self.message_queue.qsize()}")
+                
+        except Exception as e:
+            print(f"❌ Error in message callback: {e}")
+            with self.count_lock:
+                self.error_count += 1
+    
+    def _process_message(self, message_data):
+        """Process a single message - called by worker threads."""
+        try:
+            payload = json.loads(message_data['payload'].decode())
+            collector_receive_time = message_data['collector_receive_time']
             device_id = payload.get('device_id')
             
             if not device_id:
                 print("⚠️  Warning: Message missing device_id")
-                return
+                return False
             
             # Create InfluxDB point
             point = Point("device_data") \
@@ -242,28 +283,67 @@ class MQTTCollector:
                 if "detection_confidence" in payload:
                     point = point.field("detection_confidence", float(payload["detection_confidence"]))
             
-            # Use current time (default) - custom timestamps disabled to avoid write failures
-            # TODO: Re-enable timestamp preservation with proper validation
+            # Write to InfluxDB (batched - will flush every 0.5 second or when batch_size=250)
+            self.write_api.write(bucket=INFLUXDB_BUCKET, record=point)
             
-            # Write to InfluxDB (batched - will flush every 1 second or when batch_size=500)
-            try:
-                self.write_api.write(bucket=INFLUXDB_BUCKET, record=point)
+            # Update counters (thread-safe)
+            with self.count_lock:
+                self.processed_count += 1
                 self.message_count += 1
+                current_count = self.message_count
                 
-                    # Log progress every 100 messages
-                if self.message_count % 100 == 0:
-                    print(f"📊 Processed {self.message_count} messages")
-            except Exception as write_error:
-                print(f"❌ Error writing to InfluxDB: {write_error}")
-                import traceback
-                traceback.print_exc()
-                
+                # Log progress every 100 messages
+                if current_count % 100 == 0:
+                    queue_size = self.message_queue.qsize()
+                    print(f"📊 Processed {current_count} messages | Queue: {queue_size} | Workers: {NUM_WORKER_THREADS}")
+            
+            return True
+            
         except json.JSONDecodeError as e:
             print(f"❌ Error decoding JSON: {e}")
+            with self.count_lock:
+                self.error_count += 1
+            return False
         except Exception as e:
             print(f"❌ Error processing message: {e}")
+            with self.count_lock:
+                self.error_count += 1
             import traceback
             traceback.print_exc()
+            return False
+    
+    def _worker_thread(self):
+        """Worker thread that processes messages from the queue."""
+        while not self.shutdown_event.is_set():
+            try:
+                # Get message from queue with timeout to allow checking shutdown event
+                try:
+                    message_data = self.message_queue.get(timeout=1.0)
+                except Empty:
+                    # Timeout - check shutdown event again
+                    continue
+                
+                # Process the message
+                self._process_message(message_data)
+                
+                # Mark task as done
+                self.message_queue.task_done()
+                
+            except Exception as e:
+                print(f"❌ Error in worker thread: {e}")
+                import traceback
+                traceback.print_exc()
+                # Mark task as done even on error to prevent queue blocking
+                try:
+                    self.message_queue.task_done()
+                except:
+                    pass
+    
+    def _start_workers(self):
+        """Start worker threads for message processing."""
+        for i in range(NUM_WORKER_THREADS):
+            self.executor.submit(self._worker_thread)
+        print(f"🔧 Started {NUM_WORKER_THREADS} worker threads for message processing")
     
     def _on_disconnect(self, client, userdata, rc):
         """Callback when MQTT client disconnects."""
@@ -274,11 +354,13 @@ class MQTTCollector:
     def start(self):
         """Start the collector."""
         try:
-            print("🚀 Starting MQTT Collector...")
+            print("🚀 Starting MQTT Collector (Multi-threaded)...")
             protocol = "TLS" if MQTT_USE_TLS else "TCP"
             print(f"   MQTT Broker: {MQTT_BROKER_HOST}:{MQTT_BROKER_PORT} ({protocol})")
             print(f"   InfluxDB: {INFLUXDB_URL}")
             print(f"   Bucket: {INFLUXDB_BUCKET}")
+            print(f"   Worker Threads: {NUM_WORKER_THREADS}")
+            print(f"   Max Queue Size: {MAX_QUEUE_SIZE}")
             
             # Connect to MQTT broker with keepalive (60 seconds - best practice)
             # Keepalive ensures connection stays alive and detects dead connections
@@ -290,16 +372,61 @@ class MQTTCollector:
             
         except KeyboardInterrupt:
             print("\n🛑 Stopping collector...")
-            self.mqtt_client.loop_stop()
-            self.mqtt_client.disconnect()
-
-            self.write_api.close() #flush out remaining batches
-            self.influx_client.close()
-            print(f"✅ Processed {self.message_count} messages total")
+            self._shutdown()
         except Exception as e:
             print(f"❌ Error starting collector: {e}")
             import traceback
             traceback.print_exc()
+            self._shutdown()
+    
+    def _shutdown(self):
+        """Gracefully shutdown the collector and all worker threads."""
+        print("🔄 Shutting down worker threads...")
+        
+        # Signal shutdown to worker threads
+        self.shutdown_event.set()
+        
+        # Stop MQTT client
+        self.mqtt_client.loop_stop()
+        self.mqtt_client.disconnect()
+        
+        # Wait for queue to be processed (with timeout)
+        print(f"⏳ Waiting for {self.message_queue.qsize()} queued messages to be processed...")
+        try:
+            # Wait up to 30 seconds for queue to empty
+            import queue
+            for _ in range(30):
+                if self.message_queue.empty():
+                    break
+                time.sleep(1)
+        except:
+            pass
+        
+        # Shutdown executor and wait for threads to finish
+        print("🔄 Shutting down thread pool...")
+        self.executor.shutdown(wait=True, timeout=10)
+        
+        # Flush remaining batches and close InfluxDB connections
+        print("🔄 Flushing InfluxDB batches...")
+        try:
+            self.write_api.close()  # Flush out remaining batches
+        except:
+            pass
+        
+        try:
+            self.influx_client.close()
+        except:
+            pass
+        
+        # Print final statistics
+        with self.count_lock:
+            print(f"✅ Collector shutdown complete")
+            print(f"   Total messages processed: {self.processed_count}")
+            print(f"   Total messages received: {self.message_count}")
+            print(f"   Errors encountered: {self.error_count}")
+            if self.message_count > 0:
+                success_rate = (self.processed_count / self.message_count) * 100
+                print(f"   Success rate: {success_rate:.2f}%")
 
 if __name__ == "__main__":
     collector = MQTTCollector()

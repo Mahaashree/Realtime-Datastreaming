@@ -6,6 +6,7 @@ Collect latency performance data over time and store it for reporting
 import os
 import json
 import time
+import argparse
 from datetime import datetime, timedelta
 from influxdb_client import InfluxDBClient
 from dotenv import load_dotenv
@@ -125,14 +126,35 @@ def prune_old_data(data, retention_seconds):
     
     return pruned
 
-def collect_sample():
-    """Collect a single latency sample."""
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Collecting latency data...")
+def collect_sample(duration='5m'):
+    """Collect a single latency sample.
     
-    stats = get_latency_stats('5m')
+    Args:
+        duration: Time window to query (e.g., '5m', '1h', '30s'). Default: '5m'
+    """
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Collecting latency data (window: {duration})...")
+    
+    stats = get_latency_stats(duration)
     
     if not stats:
-        print("   ⚠️  No data available")
+        # Try with longer time windows to see if data exists
+        print("   ⚠️  No data in specified time window, checking longer windows...")
+        fallback_windows = ['15m', '1h', '6h', '24h']
+        for fallback_duration in fallback_windows:
+            if fallback_duration == duration:
+                continue  # Skip if already checked
+            stats = get_latency_stats(fallback_duration)
+            if stats:
+                print(f"   ℹ️  Found data in last {fallback_duration} (but not in last {duration})")
+                print(f"   → Devices may have stopped. Check device status.")
+                print(f"   → Try running with: --duration {fallback_duration}")
+                # Don't save this - we only want data from the specified window
+                return None
+        
+        print("   ⚠️  No data available in any time window checked")
+        print("   → Check if devices are running: ps aux | grep device_simulator")
+        print("   → Check if collector is running: ps aux | grep mqtt_collector")
+        print("   → Check InfluxDB connection: python check_influxdb_connection.py")
         return None
     
     data = load_data()
@@ -151,26 +173,74 @@ def collect_sample():
     return stats
 
 if __name__ == '__main__':
-    import sys
+    parser = argparse.ArgumentParser(
+        description='Collect latency performance data over time and store it for reporting',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  # Single collection with default 5-minute window
+  python monitoring/collect_latency_data.py
+  
+  # Single collection with 1-hour window
+  python monitoring/collect_latency_data.py --duration 1h
+  
+  # Continuous collection with 15-minute window
+  python monitoring/collect_latency_data.py --continuous --duration 15m
+  
+  # Continuous collection with custom interval and duration
+  python monitoring/collect_latency_data.py --continuous --duration 30m --interval 120
+
+Duration format: Use 's' for seconds, 'm' for minutes, 'h' for hours
+  Examples: '30s', '5m', '1h', '24h'
+        '''
+    )
+    parser.add_argument(
+        '--continuous', '-c',
+        action='store_true',
+        help='Run in continuous collection mode (collects data at regular intervals)'
+    )
+    parser.add_argument(
+        '--duration', '-d',
+        type=str,
+        default='5m',
+        help='Time window to query from InfluxDB (default: 5m). Format: 30s, 5m, 1h, etc.'
+    )
+    parser.add_argument(
+        '--interval', '-i',
+        type=int,
+        default=None,
+        help='Collection interval in seconds for continuous mode (default: from LATENCY_COLLECT_INTERVAL env var or 60)'
+    )
     
-    if len(sys.argv) > 1 and sys.argv[1] == '--continuous':
+    args = parser.parse_args()
+    
+    # Validate duration format
+    try:
+        parse_duration(args.duration)
+    except (ValueError, AttributeError):
+        print(f"❌ Invalid duration format: {args.duration}")
+        print("   Use format like: 30s, 5m, 1h, 24h")
+        exit(1)
+    
+    if args.continuous:
         # Continuous collection mode
-        interval = int(os.getenv('LATENCY_COLLECT_INTERVAL', '60'))  # Default 60 seconds
+        interval = args.interval if args.interval is not None else int(os.getenv('LATENCY_COLLECT_INTERVAL', '60'))
         retention_str = RETENTION_DURATION
         print(f"🔄 Starting continuous latency data collection")
         print(f"   Collection interval: {interval}s")
+        print(f"   Query window: {args.duration}")
         print(f"   Retention duration: {retention_str}")
         print(f"   Data file: {DATA_FILE}")
         print(f"   Press Ctrl+C to stop\n")
         
         try:
             while True:
-                collect_sample()
+                collect_sample(args.duration)
                 time.sleep(interval)
         except KeyboardInterrupt:
             print("\n\n✅ Collection stopped")
     else:
         # Single collection
-        collect_sample()
+        collect_sample(args.duration)
 
 

@@ -52,4 +52,6 @@ docker/mosquitto/log/
 # Development/utility scripts (optional - remove if not needed)
 # check_*.py
 # DELETE_*.py
+]
 
+collector/logs/*.log

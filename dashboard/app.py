@@ -6,6 +6,7 @@ Provides REST API endpoints and WebSocket support for real-time vehicle data vis
 import os
 import time
 import logging
+import requests
 from flask import Flask, render_template, jsonify, request
 from flask_socketio import SocketIO, emit
 from dotenv import load_dotenv
@@ -35,6 +36,18 @@ INFLUXDB_URL_FALLBACK = os.getenv("INFLUXDB_URL_FALLBACK", None)
 INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN")
 INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "my-org")
 INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "vehicle-data")
+
+# Prometheus configuration
+PROMETHEUS_PORT = int(os.getenv("PROMETHEUS_PORT", "9090"))
+PROMETHEUS_URL = f"http://localhost:{PROMETHEUS_PORT}"
+
+# Collector stats server (for accurate rolling window metrics)
+STATS_SERVER_PORT = int(os.getenv("STATS_SERVER_PORT", "9091"))
+STATS_SERVER_URL = f"http://localhost:{STATS_SERVER_PORT}"
+
+# Store previous bucket values for rolling window calculation (Prometheus fallback)
+_previous_buckets = {}
+_previous_timestamp = None
 
 # Initialize InfluxDB client
 influx_client = None
@@ -123,6 +136,12 @@ def index():
     return render_template('dashboard.html')
 
 
+@app.route('/monitoring')
+def monitoring():
+    """Serve the monitoring page."""
+    return render_template('monitoring.html')
+
+
 @app.route('/api/health')
 def health_check():
     """Health check endpoint showing InfluxDB connection status."""
@@ -154,7 +173,7 @@ def get_devices_status():
     
     try:
         # Query last seen timestamp for each device
-        # Support all measurement names: device_data (Python collector), vehicle_speed (legacy), mqtt_consumer (Telegraf)
+        # Support all measurement names: device_data (Python collector - primary), vehicle_speed (legacy/Telegraf), mqtt_consumer (Telegraf)
         query = f'''
         from(bucket: "{INFLUXDB_BUCKET}")
           |> range(start: -1h)
@@ -205,6 +224,7 @@ def get_devices_status():
 def get_device_latest(device_id):
     """Get latest speed data for a specific device."""
     try:
+        # Query latest speed - supports device_data (primary), vehicle_speed (legacy), mqtt_consumer (Telegraf)
         query = f'''
         from(bucket: "{INFLUXDB_BUCKET}")
           |> range(start: -1h)
@@ -297,12 +317,302 @@ def get_device_detections(device_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/metrics')
+def get_metrics():
+    """Fetch metrics - prefer collector stats server for accurate rolling window, fallback to Prometheus."""
+    try:
+        # First, try to get stats from collector's stats server (most accurate - rolling window)
+        try:
+            stats_response = requests.get(f"{STATS_SERVER_URL}/stats", timeout=2)
+            if stats_response.status_code == 200:
+                stats_data = stats_response.json()
+                # Convert MetricsCollector stats format to dashboard format
+                parsed_metrics = {
+                    "timestamp": stats_data.get("timestamp", time.time()),
+                    "prometheus_available": True,  # Still available, just not used for latency
+                    "counters": stats_data.get("counters", {}),
+                    "gauges": {
+                        "queue_depth": stats_data.get("queue", {}).get("current_depth", 0),
+                        "throughput": stats_data.get("rates", {}).get("throughput_msg_per_sec", 0)
+                    },
+                    "latency": stats_data.get("latency"),  # Already in correct format from MetricsCollector
+                    "rates": stats_data.get("rates", {}),
+                    "source": "stats_server"  # Indicate we're using stats server
+                }
+                logger.info(f"Using collector stats server - latency: {parsed_metrics.get('latency')}")
+                return jsonify(parsed_metrics)
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Stats server not available at {STATS_SERVER_URL}/stats, falling back to Prometheus: {e}")
+            logger.warning("⚠️  Note: Prometheus shows cumulative latency (all-time), not rolling window. Restart collector to enable stats server.")
+        
+        # Fallback: Fetch raw Prometheus metrics
+        response = requests.get(f"{PROMETHEUS_URL}/metrics", timeout=5)
+        if response.status_code != 200:
+            return jsonify({
+                "error": "Failed to fetch Prometheus metrics",
+                "status_code": response.status_code
+            }), 503
+        
+        # Parse Prometheus metrics format
+        metrics_data = {}
+        lines = response.text.strip().split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            # Skip comments and empty lines
+            if not line or line.startswith('#'):
+                continue
+            
+            # Parse metric line: metric_name{labels} value
+            if '{' in line and '}' in line:
+                # Metric with labels
+                parts = line.split('}')
+                if len(parts) == 2:
+                    metric_part = parts[0] + '}'
+                    value = parts[1].strip()
+                    
+                    # Extract metric name and labels
+                    if '{' in metric_part:
+                        name = metric_part.split('{')[0]
+                        labels = metric_part.split('{')[1].rstrip('}')
+                        
+                        if name not in metrics_data:
+                            metrics_data[name] = []
+                        
+                        # Parse labels
+                        label_dict = {}
+                        if labels:
+                            for label_pair in labels.split(','):
+                                if '=' in label_pair:
+                                    key, val = label_pair.split('=', 1)
+                                    label_dict[key.strip()] = val.strip('"')
+                        
+                        try:
+                            metrics_data[name].append({
+                                "labels": label_dict,
+                                "value": float(value)
+                            })
+                        except ValueError:
+                            pass
+            else:
+                # Simple metric without labels: metric_name value
+                parts = line.split()
+                if len(parts) == 2:
+                    name = parts[0]
+                    try:
+                        value = float(parts[1])
+                        if name not in metrics_data:
+                            metrics_data[name] = []
+                        metrics_data[name].append({
+                            "labels": {},
+                            "value": value
+                        })
+                    except ValueError:
+                        pass
+        
+        # Extract key metrics for the dashboard
+        parsed_metrics = {
+            "timestamp": time.time(),
+            "prometheus_available": True,
+            "counters": {},
+            "gauges": {},
+            "histograms": {},
+            "summaries": {}
+        }
+        
+        # Extract specific metrics we care about
+        metric_mappings = {
+            "mqtt_messages_total": ("counters", "total_messages"),
+            "mqtt_messages_processed_total": ("counters", "processed_messages"),
+            "mqtt_messages_errors_total": ("counters", "error_messages"),
+            "mqtt_messages_dropped_total": ("counters", "dropped_messages"),
+            "mqtt_queue_depth": ("gauges", "queue_depth"),
+            "mqtt_throughput_messages_per_second": ("gauges", "throughput")
+        }
+        
+        for metric_name, (category, key) in metric_mappings.items():
+            if metric_name in metrics_data:
+                # Sum all values for counters, take last for gauges
+                if category == "counters":
+                    total = sum(item["value"] for item in metrics_data[metric_name])
+                    parsed_metrics[category][key] = total
+                else:
+                    # For gauges, take the last value
+                    if metrics_data[metric_name]:
+                        parsed_metrics[category][key] = metrics_data[metric_name][-1]["value"]
+        
+        # Extract latency data from Histogram buckets
+        # Since Prometheus histograms are cumulative, we need to calculate deltas
+        # to approximate a rolling window (similar to MetricsCollector's 10k sample window)
+        global _previous_buckets, _previous_timestamp
+        
+        latency_p50 = None
+        latency_p95 = None
+        latency_p99 = None
+        latency_count = 0
+        latency_sum = 0
+        
+        current_time = time.time()
+        
+        # Calculate percentiles from histogram buckets using delta approach
+        if "mqtt_message_latency_seconds_bucket" in metrics_data:
+            # Parse current histogram buckets
+            current_buckets = {}
+            for item in metrics_data["mqtt_message_latency_seconds_bucket"]:
+                le = item.get("labels", {}).get("le")
+                if le and le != "+Inf":  # Skip infinity bucket
+                    try:
+                        bucket_value = float(le)
+                        count = int(item["value"])
+                        current_buckets[bucket_value] = count
+                    except (ValueError, TypeError):
+                        pass
+            
+            # Calculate delta from previous buckets (approximates rolling window)
+            if _previous_buckets and _previous_timestamp and (current_time - _previous_timestamp) < 60:
+                # Calculate delta buckets (new samples since last check)
+                delta_buckets = []
+                for bucket_val in sorted(current_buckets.keys()):
+                    current_count = current_buckets[bucket_val]
+                    prev_count = _previous_buckets.get(bucket_val, 0)
+                    delta_count = current_count - prev_count
+                    if delta_count > 0:
+                        delta_buckets.append((bucket_val, delta_count))
+                
+                # Calculate total delta count
+                total_delta = sum(count for _, count in delta_buckets)
+                
+                if total_delta > 0 and len(delta_buckets) > 0:
+                    # Calculate percentiles from delta buckets (rolling window approximation)
+                    def get_percentile_from_delta_buckets(p):
+                        """Calculate percentile from delta buckets."""
+                        target_count = total_delta * p
+                        cumulative = 0
+                        prev_val = 0.0
+                        prev_cumulative = 0
+                        
+                        for bucket_val, count in delta_buckets:
+                            cumulative += count
+                            if cumulative >= target_count:
+                                # Interpolate within this bucket
+                                if prev_cumulative < target_count:
+                                    ratio = (target_count - prev_cumulative) / (cumulative - prev_cumulative) if (cumulative - prev_cumulative) > 0 else 1.0
+                                    interpolated = prev_val + (bucket_val - prev_val) * ratio
+                                else:
+                                    interpolated = bucket_val
+                                return interpolated * 1000  # Convert to ms
+                            prev_val = bucket_val
+                            prev_cumulative = cumulative
+                        
+                        # Fallback to max bucket
+                        return delta_buckets[-1][0] * 1000 if delta_buckets else 0
+                    
+                    latency_p50 = get_percentile_from_delta_buckets(0.50)
+                    latency_p95 = get_percentile_from_delta_buckets(0.95)
+                    latency_p99 = get_percentile_from_delta_buckets(0.99)
+                    latency_count = total_delta
+                    
+                    # Calculate average from sum delta
+                    if "mqtt_message_latency_seconds_sum" in metrics_data:
+                        current_sum = sum(item["value"] for item in metrics_data["mqtt_message_latency_seconds_sum"])
+                        prev_sum = _previous_buckets.get("_sum", 0)
+                        delta_sum = (current_sum - prev_sum) * 1000  # Convert to ms
+                        latency_sum = delta_sum
+                        _previous_buckets["_sum"] = current_sum
+                    
+                    logger.debug(f"Calculated latency from delta buckets (rolling window): p50={latency_p50:.2f}ms, p95={latency_p95:.2f}ms, p99={latency_p99:.2f}ms, count={latency_count}")
+            
+            # Store current buckets for next calculation
+            _previous_buckets = current_buckets.copy()
+            _previous_timestamp = current_time
+            
+            # If no previous data, use current cumulative (first time)
+            if not _previous_buckets or _previous_timestamp is None:
+                sorted_buckets = sorted(current_buckets.items())
+                total_count = max(current_buckets.values()) if current_buckets else 0
+                
+                if total_count > 0:
+                    def get_percentile_from_buckets(p):
+                        target_count = total_count * p
+                        prev_val = 0.0
+                        prev_count = 0
+                        
+                        for bucket_val, count in sorted_buckets:
+                            if count >= target_count:
+                                if prev_count == 0:
+                                    return bucket_val * 1000
+                                if count > prev_count:
+                                    ratio = (target_count - prev_count) / (count - prev_count)
+                                    interpolated = prev_val + (bucket_val - prev_val) * ratio
+                                else:
+                                    interpolated = bucket_val
+                                return interpolated * 1000
+                            prev_val = bucket_val
+                            prev_count = count
+                        return sorted_buckets[-1][0] * 1000 if sorted_buckets else 0
+                    
+                    latency_p50 = get_percentile_from_buckets(0.50)
+                    latency_p95 = get_percentile_from_buckets(0.95)
+                    latency_p99 = get_percentile_from_buckets(0.99)
+                    latency_count = total_count
+                    
+                    if "mqtt_message_latency_seconds_sum" in metrics_data:
+                        latency_sum = sum(item["value"] for item in metrics_data["mqtt_message_latency_seconds_sum"]) * 1000
+                        _previous_buckets["_sum"] = sum(item["value"] for item in metrics_data["mqtt_message_latency_seconds_sum"])
+        
+        # Build latency metrics if we have data
+        if latency_count > 0 and (latency_p50 is not None or latency_p95 is not None or latency_p99 is not None):
+            latency_avg = (latency_sum / latency_count) if latency_count > 0 else 0
+            
+            parsed_metrics["latency"] = {
+                "p50": latency_p50 if latency_p50 is not None else 0,
+                "p95": latency_p95 if latency_p95 is not None else 0,
+                "p99": latency_p99 if latency_p99 is not None else 0,
+                "avg": latency_avg,
+                "count": latency_count
+            }
+            logger.debug(f"Latency metrics: {parsed_metrics['latency']}")
+        else:
+            logger.debug("No latency data found in Prometheus metrics")
+        
+        # Calculate rates
+        total = parsed_metrics["counters"].get("total_messages", 0)
+        processed = parsed_metrics["counters"].get("processed_messages", 0)
+        errors = parsed_metrics["counters"].get("error_messages", 0)
+        drops = parsed_metrics["counters"].get("dropped_messages", 0)
+        
+        parsed_metrics["rates"] = {
+            "success_rate_percent": (processed / total * 100) if total > 0 else 0,
+            "error_rate_percent": (errors / total * 100) if total > 0 else 0,
+            "drop_rate_percent": (drops / total * 100) if total > 0 else 0,
+            "throughput_msg_per_sec": parsed_metrics["gauges"].get("throughput", 0)
+        }
+        
+        return jsonify(parsed_metrics)
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching Prometheus metrics: {e}")
+        return jsonify({
+            "error": "Prometheus metrics unavailable",
+            "message": str(e),
+            "prometheus_available": False,
+            "prometheus_url": PROMETHEUS_URL
+        }), 503
+    except Exception as e:
+        logger.error(f"Error parsing Prometheus metrics: {e}")
+        return jsonify({
+            "error": "Failed to parse metrics",
+            "message": str(e)
+        }), 500
+
+
 @app.route('/api/devices/<device_id>/history')
 def get_device_history(device_id):
     """Get historical speed data for a specific device."""
     try:
         duration = request.args.get('duration', '5m')  # Default 5 minutes
         
+        # Query supports device_data (primary), vehicle_speed (legacy), mqtt_consumer (Telegraf)
         query = f'''
         from(bucket: "{INFLUXDB_BUCKET}")
           |> range(start: -{duration})
@@ -464,4 +774,3 @@ if __name__ == '__main__':
     
     logger.info(f"Starting Flask dashboard on {host}:{port}")
     socketio.run(app, host=host, port=port, debug=True)
-

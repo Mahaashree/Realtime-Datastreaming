@@ -31,11 +31,43 @@
             border-radius: 10px;
             margin-bottom: 20px;
             box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header-content {
+            flex: 1;
         }
 
         .header h1 {
             color: #333;
             margin-bottom: 10px;
+        }
+
+        .nav-buttons {
+            display: flex;
+            gap: 10px;
+        }
+
+        .nav-button {
+            padding: 10px 20px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            text-decoration: none;
+            font-weight: 600;
+            transition: background 0.3s;
+        }
+
+        .nav-button:hover {
+            background: #5568d3;
+        }
+
+        .nav-button.active {
+            background: #764ba2;
         }
 
         .status-bar {
@@ -219,10 +251,16 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>🚗 Vehicle Speed Monitoring Dashboard</h1>
-            <p>Real-time data streaming from vehicle devices</p>
-            <div class="status-bar" id="statusBar">
-                <!-- Device status indicators will be inserted here -->
+            <div class="header-content">
+                <h1>🚗 Vehicle Speed Monitoring Dashboard</h1>
+                <p>Real-time data streaming from vehicle devices</p>
+                <div class="status-bar" id="statusBar">
+                    <!-- Device status indicators will be inserted here -->
+                </div>
+            </div>
+            <div class="nav-buttons">
+                <a href="/" class="nav-button active">Vehicle Dashboard</a>
+                <a href="/monitoring" class="nav-button">System Monitoring</a>
             </div>
         </div>
 
@@ -594,4 +632,3 @@
     </script>
 </body>
 </html>
-

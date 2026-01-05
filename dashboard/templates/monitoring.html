@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>System Monitoring Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            color: #333;
+            margin: 0;
+        }
+
+        .nav-buttons {
+            display: flex;
+            gap: 10px;
+        }
+
+        .nav-button {
+            padding: 10px 20px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            text-decoration: none;
+            font-weight: 600;
+            transition: background 0.3s;
+        }
+
+        .nav-button:hover {
+            background: #5568d3;
+        }
+
+        .nav-button.active {
+            background: #764ba2;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+
+        .status-online {
+            background-color: #10b981;
+            box-shadow: 0 0 8px #10b981;
+        }
+
+        .status-offline {
+            background-color: #ef4444;
+            box-shadow: 0 0 8px #ef4444;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .metric-card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .metric-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .metric-title {
+            font-size: 14px;
+            color: #6b7280;
+            font-weight: 500;
+            text-transform: uppercase;
+        }
+
+        .metric-value {
+            font-size: 32px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .metric-unit {
+            font-size: 14px;
+            color: #6b7280;
+            margin-left: 4px;
+        }
+
+        .metric-change {
+            font-size: 12px;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+
+        .metric-change.positive {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .metric-change.negative {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .chart-card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+        }
+
+        .chart-header {
+            margin-bottom: 15px;
+        }
+
+        .chart-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .chart-container {
+            position: relative;
+            height: 300px;
+        }
+
+        .alerts-section {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .alerts-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .alert-item {
+            padding: 12px;
+            border-left: 4px solid;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            background: #f9fafb;
+        }
+
+        .alert-item.warning {
+            border-color: #f59e0b;
+            background: #fef3c7;
+        }
+
+        .alert-item.error {
+            border-color: #ef4444;
+            background: #fee2e2;
+        }
+
+        .alert-item.critical {
+            border-color: #dc2626;
+            background: #fee2e2;
+        }
+
+        .alert-time {
+            font-size: 12px;
+            color: #6b7280;
+            margin-top: 4px;
+        }
+
+        .connection-status {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 10px 20px;
+            background: white;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .connection-status.connected {
+            border-left: 4px solid #10b981;
+        }
+
+        .connection-status.disconnected {
+            border-left: 4px solid #ef4444;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 System Monitoring Dashboard</h1>
+            <div class="nav-buttons">
+                <a href="/" class="nav-button">Vehicle Dashboard</a>
+                <a href="/monitoring" class="nav-button active">System Monitoring</a>
+            </div>
+        </div>
+
+        <div class="connection-status disconnected" id="connectionStatus">
+            <span class="status-indicator" id="connectionIndicator"></span>
+            <span id="connectionText">Connecting to Prometheus...</span>
+        </div>
+
+        <div class="metrics-grid" id="metricsGrid">
+            <!-- Metrics cards will be inserted here -->
+        </div>
+
+        <div class="chart-card">
+            <div class="chart-header">
+                <div class="chart-title">Message Throughput (messages/sec)</div>
+            </div>
+            <div class="chart-container">
+                <canvas id="throughputChart"></canvas>
+            </div>
+        </div>
+
+        <div class="chart-card">
+            <div class="chart-header">
+                <div class="chart-title">Latency Percentiles (ms)</div>
+            </div>
+            <div class="chart-container">
+                <canvas id="latencyChart"></canvas>
+            </div>
+        </div>
+
+        <div class="chart-card">
+            <div class="chart-header">
+                <div class="chart-title">Queue Depth</div>
+            </div>
+            <div class="chart-container">
+                <canvas id="queueChart"></canvas>
+            </div>
+        </div>
+
+        <div class="alerts-section">
+            <div class="alerts-header">
+                <h2>System Alerts</h2>
+                <span id="alertsCount">0 alerts</span>
+            </div>
+            <div id="alertsList">
+                <p style="color: #6b7280;">No alerts at this time</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Chart instances
+        let throughputChart = null;
+        let latencyChart = null;
+        let queueChart = null;
+
+        // Data storage
+        const throughputData = { labels: [], values: [] };
+        const latencyData = { labels: [], p50: [], p95: [], p99: [] };
+        const queueData = { labels: [], values: [] };
+        const MAX_DATA_POINTS = 60; // Keep last 60 data points (1 minute at 1s intervals)
+
+        // Initialize charts
+        function initializeCharts() {
+            // Throughput chart
+            const throughputCtx = document.getElementById('throughputChart').getContext('2d');
+            throughputChart = new Chart(throughputCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Throughput (msg/s)',
+                        data: [],
+                        borderColor: 'rgb(102, 126, 234)',
+                        backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                        tension: 0.4,
+                        fill: true
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: true
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            title: {
+                                display: true,
+                                text: 'Messages per Second'
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Latency chart
+            const latencyCtx = document.getElementById('latencyChart').getContext('2d');
+            latencyChart = new Chart(latencyCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        {
+                            label: 'P50',
+                            data: [],
+                            borderColor: 'rgb(16, 185, 129)',
+                            backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                            tension: 0.4
+                        },
+                        {
+                            label: 'P95',
+                            data: [],
+                            borderColor: 'rgb(245, 158, 11)',
+                            backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                            tension: 0.4
+                        },
+                        {
+                            label: 'P99',
+                            data: [],
+                            borderColor: 'rgb(239, 68, 68)',
+                            backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                            tension: 0.4
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: true
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            title: {
+                                display: true,
+                                text: 'Latency (ms)'
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Queue depth chart
+            const queueCtx = document.getElementById('queueChart').getContext('2d');
+            queueChart = new Chart(queueCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Queue Depth',
+                        data: [],
+                        borderColor: 'rgb(139, 92, 246)',
+                        backgroundColor: 'rgba(139, 92, 246, 0.1)',
+                        tension: 0.4,
+                        fill: true
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: true
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            title: {
+                                display: true,
+                                text: 'Queue Depth'
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Update metrics cards
+        function updateMetricsCards(metrics) {
+            const grid = document.getElementById('metricsGrid');
+            
+            const metricCards = [
+                {
+                    title: 'Total Messages',
+                    value: metrics.counters?.total_messages || 0,
+                    unit: '',
+                    format: (v) => v.toLocaleString()
+                },
+                {
+                    title: 'Processed Messages',
+                    value: metrics.counters?.processed_messages || 0,
+                    unit: '',
+                    format: (v) => v.toLocaleString()
+                },
+                {
+                    title: 'Error Messages',
+                    value: metrics.counters?.error_messages || 0,
+                    unit: '',
+                    format: (v) => v.toLocaleString(),
+                    alert: metrics.rates?.error_rate_percent > 5
+                },
+                {
+                    title: 'Dropped Messages',
+                    value: metrics.counters?.dropped_messages || 0,
+                    unit: '',
+                    format: (v) => v.toLocaleString(),
+                    alert: metrics.rates?.drop_rate_percent > 2
+                },
+                {
+                    title: 'Throughput',
+                    value: metrics.rates?.throughput_msg_per_sec || 0,
+                    unit: 'msg/s',
+                    format: (v) => v.toFixed(2)
+                },
+                {
+                    title: 'Queue Depth',
+                    value: metrics.gauges?.queue_depth || 0,
+                    unit: '',
+                    format: (v) => v.toLocaleString(),
+                    alert: (metrics.gauges?.queue_depth || 0) > 15000
+                },
+                {
+                    title: 'Error Rate',
+                    value: metrics.rates?.error_rate_percent || 0,
+                    unit: '%',
+                    format: (v) => v.toFixed(2),
+                    alert: metrics.rates?.error_rate_percent > 5
+                },
+                {
+                    title: 'Drop Rate',
+                    value: metrics.rates?.drop_rate_percent || 0,
+                    unit: '%',
+                    format: (v) => v.toFixed(2),
+                    alert: metrics.rates?.drop_rate_percent > 2
+                }
+            ];
+
+            grid.innerHTML = '';
+            metricCards.forEach(card => {
+                const cardEl = document.createElement('div');
+                cardEl.className = 'metric-card';
+                if (card.alert) {
+                    cardEl.style.borderLeft = '4px solid #ef4444';
+                }
+                cardEl.innerHTML = `
+                    <div class="metric-header">
+                        <div class="metric-title">${card.title}</div>
+                    </div>
+                    <div class="metric-value">
+                        ${card.format(card.value)}<span class="metric-unit">${card.unit}</span>
+                    </div>
+                `;
+                grid.appendChild(cardEl);
+            });
+        }
+
+        // Update charts
+        function updateCharts(metrics) {
+            const now = new Date().toLocaleTimeString();
+
+            // Update throughput chart
+            if (metrics.rates?.throughput_msg_per_sec !== undefined) {
+                throughputData.labels.push(now);
+                throughputData.values.push(metrics.rates.throughput_msg_per_sec);
+                
+                if (throughputData.labels.length > MAX_DATA_POINTS) {
+                    throughputData.labels.shift();
+                    throughputData.values.shift();
+                }
+                
+                throughputChart.data.labels = throughputData.labels;
+                throughputChart.data.datasets[0].data = throughputData.values;
+                throughputChart.update('none');
+            }
+
+            // Update latency chart
+            if (metrics.latency && metrics.latency.count > 0) {
+                // Only update if we have valid latency data
+                const p50 = metrics.latency.p50 || 0;
+                const p95 = metrics.latency.p95 || 0;
+                const p99 = metrics.latency.p99 || 0;
+                
+                latencyData.labels.push(now);
+                latencyData.p50.push(p50);
+                latencyData.p95.push(p95);
+                latencyData.p99.push(p99);
+                
+                if (latencyData.labels.length > MAX_DATA_POINTS) {
+                    latencyData.labels.shift();
+                    latencyData.p50.shift();
+                    latencyData.p95.shift();
+                    latencyData.p99.shift();
+                }
+                
+                latencyChart.data.labels = latencyData.labels;
+                latencyChart.data.datasets[0].data = latencyData.p50;
+                latencyChart.data.datasets[1].data = latencyData.p95;
+                latencyChart.data.datasets[2].data = latencyData.p99;
+                latencyChart.update('none');
+            } else if (metrics.latency && metrics.latency.count === 0) {
+                // Show message if no data yet
+                console.log('Latency data not available yet (count: 0)');
+            }
+
+            // Update queue depth chart
+            if (metrics.gauges?.queue_depth !== undefined) {
+                queueData.labels.push(now);
+                queueData.values.push(metrics.gauges.queue_depth);
+                
+                if (queueData.labels.length > MAX_DATA_POINTS) {
+                    queueData.labels.shift();
+                    queueData.values.shift();
+                }
+                
+                queueChart.data.labels = queueData.labels;
+                queueChart.data.datasets[0].data = queueData.values;
+                queueChart.update('none');
+            }
+        }
+
+        // Check for alerts
+        function checkAlerts(metrics) {
+            const alerts = [];
+            const thresholds = {
+                p95_latency_ms: 2000,
+                p99_latency_ms: 5000,
+                error_rate_percent: 5,
+                drop_rate_percent: 2,
+                queue_depth: 15000,
+                throughput_min: 50
+            };
+
+            if (metrics.latency) {
+                if (metrics.latency.p95 > thresholds.p95_latency_ms) {
+                    alerts.push({
+                        severity: 'warning',
+                        message: `P95 latency (${metrics.latency.p95.toFixed(0)}ms) exceeds threshold (${thresholds.p95_latency_ms}ms)`,
+                        timestamp: new Date()
+                    });
+                }
+                if (metrics.latency.p99 > thresholds.p99_latency_ms) {
+                    alerts.push({
+                        severity: 'error',
+                        message: `P99 latency (${metrics.latency.p99.toFixed(0)}ms) exceeds threshold (${thresholds.p99_latency_ms}ms)`,
+                        timestamp: new Date()
+                    });
+                }
+            }
+
+            if (metrics.rates?.error_rate_percent > thresholds.error_rate_percent) {
+                alerts.push({
+                    severity: 'error',
+                    message: `Error rate (${metrics.rates.error_rate_percent.toFixed(2)}%) exceeds threshold (${thresholds.error_rate_percent}%)`,
+                    timestamp: new Date()
+                });
+            }
+
+            if (metrics.rates?.drop_rate_percent > thresholds.drop_rate_percent) {
+                alerts.push({
+                    severity: 'critical',
+                    message: `Drop rate (${metrics.rates.drop_rate_percent.toFixed(2)}%) exceeds threshold (${thresholds.drop_rate_percent}%)`,
+                    timestamp: new Date()
+                });
+            }
+
+            if (metrics.gauges?.queue_depth > thresholds.queue_depth) {
+                alerts.push({
+                    severity: 'warning',
+                    message: `Queue depth (${metrics.gauges.queue_depth}) exceeds threshold (${thresholds.queue_depth})`,
+                    timestamp: new Date()
+                });
+            }
+
+            if (metrics.rates?.throughput_msg_per_sec > 0 && metrics.rates.throughput_msg_per_sec < thresholds.throughput_min) {
+                alerts.push({
+                    severity: 'warning',
+                    message: `Throughput (${metrics.rates.throughput_msg_per_sec.toFixed(2)} msg/s) below threshold (${thresholds.throughput_min} msg/s)`,
+                    timestamp: new Date()
+                });
+            }
+
+            return alerts;
+        }
+
+        // Update alerts display
+        function updateAlerts(metrics) {
+            const alerts = checkAlerts(metrics);
+            const alertsList = document.getElementById('alertsList');
+            const alertsCount = document.getElementById('alertsCount');
+
+            alertsCount.textContent = `${alerts.length} alert${alerts.length !== 1 ? 's' : ''}`;
+
+            if (alerts.length === 0) {
+                alertsList.innerHTML = '<p style="color: #6b7280;">No alerts at this time</p>';
+                return;
+            }
+
+            alertsList.innerHTML = '';
+            alerts.forEach(alert => {
+                const alertEl = document.createElement('div');
+                alertEl.className = `alert-item ${alert.severity}`;
+                alertEl.innerHTML = `
+                    <div style="font-weight: 600; margin-bottom: 4px;">${alert.message}</div>
+                    <div class="alert-time">${alert.timestamp.toLocaleString()}</div>
+                `;
+                alertsList.appendChild(alertEl);
+            });
+        }
+
+        // Fetch metrics from API
+        async function fetchMetrics() {
+            try {
+                const response = await fetch('/api/metrics');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                const metrics = await response.json();
+
+                if (metrics.prometheus_available) {
+                    document.getElementById('connectionStatus').classList.remove('disconnected');
+                    document.getElementById('connectionStatus').classList.add('connected');
+                    document.getElementById('connectionIndicator').classList.add('status-online');
+                    document.getElementById('connectionText').textContent = 'Connected to Prometheus';
+                } else {
+                    document.getElementById('connectionStatus').classList.remove('connected');
+                    document.getElementById('connectionStatus').classList.add('disconnected');
+                    document.getElementById('connectionIndicator').classList.remove('status-online');
+                    document.getElementById('connectionText').textContent = 'Prometheus unavailable';
+                }
+
+                // Debug logging
+                if (metrics.latency) {
+                    console.log('Latency data:', metrics.latency);
+                } else {
+                    console.log('No latency data in metrics response');
+                }
+
+                updateMetricsCards(metrics);
+                updateCharts(metrics);
+                updateAlerts(metrics);
+
+            } catch (error) {
+                console.error('Error fetching metrics:', error);
+                document.getElementById('connectionStatus').classList.remove('connected');
+                document.getElementById('connectionStatus').classList.add('disconnected');
+                document.getElementById('connectionIndicator').classList.remove('status-online');
+                document.getElementById('connectionText').textContent = 'Failed to fetch metrics';
+            }
+        }
+
+        // Initialize on page load
+        initializeCharts();
+        fetchMetrics();
+
+        // Fetch metrics every second
+        setInterval(fetchMetrics, 1000);
+    </script>
+</body>
+</html>
+

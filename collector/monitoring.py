@@ -18,7 +18,7 @@ try:
     PROMETHEUS_AVAILABLE = True
 except ImportError:
     PROMETHEUS_AVAILABLE = False
-    print("⚠️  prometheus_client not installed. Run: pip install prometheus-client")
+    print("WARNING: prometheus_client not installed. Run: pip install prometheus-client")
 
 
 @dataclass
@@ -75,6 +75,15 @@ class MetricsCollector:
         self.error_messages = 0
         self.dropped_messages = 0
         
+        # Pipeline-specific counters
+        self.live_messages_processed = 0
+        self.offline_messages_processed = 0
+        self.duplicate_messages = 0
+        
+        # Pipeline-specific latency tracking
+        self.live_latencies = deque(maxlen=10000)
+        self.offline_latencies = deque(maxlen=10000)
+        
         # Rates (messages per second)
         self.last_rate_check = time.time()
         self.messages_since_last_check = 0
@@ -119,8 +128,19 @@ class MetricsCollector:
         self.prom_messages_errors = Counter('mqtt_messages_errors_total', 'Total messages with errors')
         self.prom_messages_dropped = Counter('mqtt_messages_dropped_total', 'Total messages dropped (queue full)')
         
+        # Pipeline-specific metrics
+        self.prom_live_messages = Counter('mqtt_live_messages_total', 'Total live pipeline messages')
+        self.prom_offline_messages = Counter('mqtt_offline_messages_total', 'Total offline pipeline messages')
+        self.prom_duplicate_messages = Counter('mqtt_duplicate_messages_total', 'Total duplicate messages')
+        
         self.prom_queue_depth = Gauge('mqtt_queue_depth', 'Current message queue depth')
+        self.prom_live_queue_depth = Gauge('mqtt_live_queue_depth', 'Current live queue depth')
+        self.prom_offline_queue_depth = Gauge('mqtt_offline_queue_depth', 'Current offline queue depth')
         self.prom_throughput = Gauge('mqtt_throughput_messages_per_second', 'Current message processing rate')
+        
+        # Thread allocation metrics
+        self.prom_live_threads = Gauge('mqtt_live_worker_threads', 'Number of live worker threads')
+        self.prom_offline_threads = Gauge('mqtt_offline_worker_threads', 'Number of offline worker threads')
         
         self.prom_latency = Histogram(
             'mqtt_message_latency_seconds',
@@ -140,18 +160,31 @@ class MetricsCollector:
         if self.enable_prometheus:
             self.prom_messages_total.inc()
     
-    def record_message_processed(self, latency_seconds: Optional[float] = None):
+    def record_message_processed(self, latency_seconds: Optional[float] = None, pipeline: str = 'unknown'):
         """Record a successfully processed message."""
         with self.lock:
             self.processed_messages += 1
             if latency_seconds is not None:
                 self.latencies.append(latency_seconds)
+                
+                # Track pipeline-specific latencies
+                if pipeline == 'live':
+                    self.live_latencies.append(latency_seconds)
+                    self.live_messages_processed += 1
+                elif pipeline == 'offline':
+                    self.offline_latencies.append(latency_seconds)
+                    self.offline_messages_processed += 1
         
         if self.enable_prometheus:
             self.prom_messages_processed.inc()
             if latency_seconds is not None:
                 self.prom_latency.observe(latency_seconds)
                 self.prom_latency_summary.observe(latency_seconds)
+            
+            if pipeline == 'live':
+                self.prom_live_messages.inc()
+            elif pipeline == 'offline':
+                self.prom_offline_messages.inc()
     
     def record_error(self):
         """Record a message processing error."""
@@ -169,13 +202,29 @@ class MetricsCollector:
         if self.enable_prometheus:
             self.prom_messages_dropped.inc()
     
-    def record_queue_depth(self, depth: int):
+    def record_duplicate(self):
+        """Record a duplicate message."""
+        with self.lock:
+            self.duplicate_messages += 1
+        
+        if self.enable_prometheus:
+            self.prom_duplicate_messages.inc()
+    
+    def record_queue_depth(self, depth: int, live_depth: int = 0, offline_depth: int = 0):
         """Record current queue depth."""
         with self.lock:
             self.queue_depth_history.append(depth)
         
         if self.enable_prometheus:
             self.prom_queue_depth.set(depth)
+            self.prom_live_queue_depth.set(live_depth)
+            self.prom_offline_queue_depth.set(offline_depth)
+    
+    def record_thread_allocation(self, live_threads: int, offline_threads: int):
+        """Record current thread allocation."""
+        if self.enable_prometheus:
+            self.prom_live_threads.set(live_threads)
+            self.prom_offline_threads.set(offline_threads)
     
     def calculate_latency_metrics(self) -> Optional[LatencyMetrics]:
         """Calculate latency percentiles from collected samples."""
@@ -184,6 +233,35 @@ class MetricsCollector:
                 return None
             
             sorted_latencies = sorted(self.latencies)
+            count = len(sorted_latencies)
+            
+            def percentile(p):
+                k = (count - 1) * p
+                f = int(k)
+                c = f + 1 if f < count - 1 else f
+                d0 = sorted_latencies[f]
+                d1 = sorted_latencies[c]
+                return d0 + (d1 - d0) * (k - f)
+            
+            return LatencyMetrics(
+                p50=percentile(0.50) * 1000,
+                p95=percentile(0.95) * 1000,
+                p99=percentile(0.99) * 1000,
+                max=max(sorted_latencies) * 1000,
+                min=min(sorted_latencies) * 1000,
+                avg=sum(sorted_latencies) / count * 1000,
+                count=count
+            )
+    
+    def calculate_pipeline_latency_metrics(self, pipeline: str) -> Optional[LatencyMetrics]:
+        """Calculate latency percentiles for specific pipeline."""
+        with self.lock:
+            latencies = self.live_latencies if pipeline == 'live' else self.offline_latencies
+            
+            if not latencies:
+                return None
+            
+            sorted_latencies = sorted(latencies)
             count = len(sorted_latencies)
             
             def percentile(p):
@@ -226,6 +304,9 @@ class MetricsCollector:
             processed = self.processed_messages
             errors = self.error_messages
             drops = self.dropped_messages
+            duplicates = self.duplicate_messages
+            live_processed = self.live_messages_processed
+            offline_processed = self.offline_messages_processed
             
             error_rate = (errors / total * 100) if total > 0 else 0
             drop_rate = (drops / total * 100) if total > 0 else 0
@@ -235,6 +316,8 @@ class MetricsCollector:
             max_queue_depth = max(self.queue_depth_history) if self.queue_depth_history else 0
         
         latency = self.calculate_latency_metrics()
+        live_latency = self.calculate_pipeline_latency_metrics('live')
+        offline_latency = self.calculate_pipeline_latency_metrics('offline')
         throughput = self.calculate_throughput()
         
         return {
@@ -244,7 +327,10 @@ class MetricsCollector:
                 'total_messages': total,
                 'processed_messages': processed,
                 'error_messages': errors,
-                'dropped_messages': drops
+                'dropped_messages': drops,
+                'duplicate_messages': duplicates,
+                'live_messages_processed': live_processed,
+                'offline_messages_processed': offline_processed
             },
             'rates': {
                 'success_rate_percent': round(success_rate, 2),
@@ -253,6 +339,8 @@ class MetricsCollector:
                 'throughput_msg_per_sec': round(throughput, 2)
             },
             'latency': latency.to_dict() if latency else None,
+            'live_latency': live_latency.to_dict() if live_latency else None,
+            'offline_latency': offline_latency.to_dict() if offline_latency else None,
             'queue': {
                 'current_depth': self.queue_depth_history[-1] if self.queue_depth_history else 0,
                 'avg_depth': round(avg_queue_depth, 2),
@@ -426,7 +514,10 @@ class StructuredLogger:
         self.logger.error(message, extra={'extra': extra} if extra else {})
     
     def critical(self, message: str, **extra):
-        self.logger.critical(message, extra={'extra': extra} if extra else {})
+        if extra:
+            self.logger.critical(message, extra=extra)
+        else:
+            self.logger.critical(message)
 
 
 def print_alert_notification(alert: Alert):

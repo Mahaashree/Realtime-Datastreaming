@@ -1,6 +1,6 @@
 """
-Script to run multiple device simulators concurrently.
-Each device runs in a separate process to simulate independent devices.
+Script to run multiple dual-pipeline device simulators concurrently.
+Each device runs in a separate process to simulate independent devices with dual-pipeline support.
 """
 
 import subprocess
@@ -67,14 +67,14 @@ def signal_handler(sig, frame):
 
 
 def start_device(device_id, restart_count=0):
-    """Start a single device simulator."""
+    """Start a single dual-pipeline device simulator."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    simulator_script = os.path.join(script_dir, "device_simulator.py")
+    simulator_script = os.path.join(script_dir, "dual_pipeline_device.py")
     
     if SHOW_LOGS:
         # Show logs - don't capture output, let it go to console
         process = subprocess.Popen(
-            [sys.executable, simulator_script, device_id, broker_host, str(broker_port)],
+            [sys.executable, simulator_script, device_id],  # dual_pipeline_device.py takes device_id as argument
             stdout=sys.stdout if not LOG_PREFIX else subprocess.PIPE,
             stderr=sys.stderr if not LOG_PREFIX else subprocess.PIPE
         )
@@ -96,7 +96,7 @@ def start_device(device_id, restart_count=0):
     else:
         # Hide logs - capture output
         process = subprocess.Popen(
-            [sys.executable, simulator_script, device_id, broker_host, str(broker_port)],
+            [sys.executable, simulator_script, device_id],  # dual_pipeline_device.py takes device_id as argument
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
@@ -111,23 +111,24 @@ def start_device(device_id, restart_count=0):
 
 
 def main():
-    """Start device simulators (configurable count)."""
+    """Start dual-pipeline device simulators (configurable count)."""
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
     print("=" * 70)
-    print("Vehicle Device Simulator Manager")
+    print("Dual-Pipeline Vehicle Device Simulator Manager")
     print("=" * 70)
     print(f"MQTT Broker: {broker_host}:{broker_port}")
     print(f"Number of Devices: {NUM_DEVICES}")
     print(f"Logging: {'Enabled' if SHOW_LOGS else 'Disabled'}")
     print(f"Log Prefix: {'Enabled' if LOG_PREFIX else 'Disabled'}")
+    print(f"Pipeline Mode: Dual (Live Stream + Offline Queue)")
     print("Press Ctrl+C to stop all devices")
     print("=" * 70)
     print()
     
     # Start device processes
-    print(f"Starting {NUM_DEVICES} device simulators...")
+    print(f"Starting {NUM_DEVICES} dual-pipeline device simulators...")
     for i in range(1, NUM_DEVICES + 1):
         device_id = f"vehicle_{i:03d}"  # Use 3 digits for 100+ devices
         print(f"  [{i:3}/{NUM_DEVICES}] Starting {device_id}...", end=" ", flush=True)
@@ -153,7 +154,8 @@ def main():
     
     print()
     print("=" * 70)
-    print("All devices started. Monitoring status...")
+    print("All dual-pipeline devices started. Monitoring status...")
+    print("Devices will automatically switch between live and offline modes")
     print("=" * 70)
     print()
     
@@ -189,7 +191,8 @@ def main():
             # Periodic status update
             if current_time - last_status_time >= status_interval:
                 running_count = sum(1 for info in process_info.values() if info["process"].poll() is None)
-                print(f"\n📊 Status: {running_count}/{NUM_DEVICES} devices running")
+                print(f"\n📊 Status: {running_count}/{NUM_DEVICES} dual-pipeline devices running")
+                print(f"   💡 Tip: Check offline_queues/ directory for SQLite files when server is down")
                 last_status_time = current_time
             
             time.sleep(5)  # Check every 5 seconds

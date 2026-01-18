@@ -128,8 +128,20 @@ class DualPipelineVehicleDevice:
             
             queue_size = self.offline_queue.get_size()
             
+            # DEBUG: Log connection details
+            print(f"DEBUG [{self.device_id}] Connected - Mode: {current_mode.value}, Queue: {queue_size} messages")
+            
             if current_mode.value == "live":
                 if queue_size > 0:
+                    # EVENT-DRIVEN: Notify collector about offline data
+                    try:
+                        notification = {"queue_size": queue_size, "device_id": self.device_id}
+                        notification_topic = f"device/offline/{self.device_id}"
+                        client.publish(notification_topic, json.dumps(notification), qos=1)
+                        print(f"📬 [{self.device_id}] Sent offline notification to collector: {queue_size} messages pending")
+                    except Exception as e:
+                        print(f"WARNING [{self.device_id}] Failed to send offline notification: {e}")
+                    
                     print(f"SUCCESS [{self.device_id}] Connected - starting background flush for {queue_size} offline messages")
                     # Start background flush thread instead of blocking
                     self._start_background_flush()
@@ -467,6 +479,10 @@ class DualPipelineVehicleDevice:
             self.publish_thread = Thread(target=self._publish_loop, daemon=True)
             self.publish_thread.start()
             
+            # Start periodic queue check
+            self.queue_check_thread = Thread(target=self._periodic_queue_check, daemon=True)
+            self.queue_check_thread.start()
+            
         except Exception as e:
             print(f"ERROR [{self.device_id}] Start failed: {e}")
     
@@ -565,6 +581,32 @@ class DualPipelineVehicleDevice:
         # Start background flush if we have offline messages
         if self.is_connected and self.offline_queue.has_messages():
             self._start_background_flush()
+
+    
+    def _periodic_queue_check(self):
+        """Periodically check offline queue and send notifications if messages accumulate."""
+        while not self.shutdown_event.is_set():
+            try:
+                time.sleep(60)  # Check every 60 seconds
+                
+                # Only check if we're connected in live mode
+                if self.is_connected and self.pipeline_manager.current_mode == PipelineMode.LIVE:
+                    queue_size = self.offline_queue.get_size()
+                    
+                    # If we have accumulated offline messages while in live mode, notify collector
+                    if queue_size > 100:  # Threshold: notify if more than 100 messages
+                        notification = {
+                            'queue_size': queue_size,
+                            'device_id': self.device_id
+                        }
+                        notification_topic = f'device/offline/{self.device_id}'
+                        result = self.client.publish(notification_topic, json.dumps(notification), qos=1)
+                        
+                        if result.rc == 0:
+                            print(f'🔔 [{self.device_id}] Periodic check: Notified collector about {queue_size} queued messages')
+                            
+            except Exception as e:
+                print(f'ERROR [{self.device_id}] Periodic queue check failed: {e}')
 
 
 def start_dual_pipeline_devices(num_devices: int = 5):

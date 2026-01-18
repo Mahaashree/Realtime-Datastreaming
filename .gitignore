@@ -24,7 +24,7 @@ Thumbs.db
 
 # Device offline queues
 devices/*.db
-devices/queues/
+devices/offline_queues/
 
 # Logs
 *.log

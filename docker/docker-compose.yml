@@ -26,14 +26,19 @@ services:
       - DOCKER_INFLUXDB_INIT_ORG=my-org
       - DOCKER_INFLUXDB_INIT_BUCKET=vehicle-data
       - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=my-super-secret-auth-token
-      # Performance Tuning - Optimized for high-throughput writes
-      - INFLUXD_ENGINE_MAX_CONCURRENT_COMPACTIONS=4 # Increase from default 2
-      - INFLUXD_STORAGE_CACHE_MAX_MEMORY_SIZE=2147483648 # 2GB cache
-      - INFLUXD_STORAGE_WAL_FSYNC_DELAY=100ms # Batch WAL writes
-      - INFLUXD_STORAGE_MAX_CONCURRENT_WRITES=128 # Increase concurrent writes
-      - INFLUXD_HTTP_WRITE_TIMEOUT=30s # Increase write timeout
-      - INFLUXD_QUERY_CONCURRENCY=16 # Increase query concurrency
-      - INFLUXD_QUERY_QUEUE_SIZE=128 # Increase query queue
+      # Performance Tuning - OPTIMIZED TO REDUCE COMPACTION LATENCY
+      - INFLUXD_ENGINE_MAX_CONCURRENT_COMPACTIONS=1  # REDUCED from 4: Only 1 compaction at a time to reduce latency spikes
+      - INFLUXD_STORAGE_CACHE_MAX_MEMORY_SIZE=4294967296  # 4GB cache (increased from 2GB) to reduce flush frequency
+      - INFLUXD_STORAGE_CACHE_SNAPSHOT_MEMORY_SIZE=104857600  # 100MB snapshot size (increased from default 25MB)
+      - INFLUXD_STORAGE_CACHE_SNAPSHOT_WRITE_COLD_DURATION=30m  # Wait 30min before snapshot (default: 10m)
+      - INFLUXD_STORAGE_WAL_FSYNC_DELAY=200ms  # Batch WAL writes over 200ms (increased from 100ms)
+      - INFLUXD_STORAGE_COMPACT_FULL_WRITE_COLD_DURATION=8h  # Full compaction every 8h (default: 4h)
+      - INFLUXD_STORAGE_COMPACT_THROUGHPUT=52428800  # Limit compaction speed to 50MB/s
+      - INFLUXD_STORAGE_COMPACT_THROUGHPUT_BURST=62914560  # Burst to 60MB/s
+      - INFLUXD_STORAGE_MAX_CONCURRENT_WRITES=64  # REDUCED from 128: Prevent overload
+      - INFLUXD_HTTP_WRITE_TIMEOUT=30s  # Keep write timeout at 30s
+      - INFLUXD_QUERY_CONCURRENCY=8  # REDUCED from 16: Leave more resources for writes
+      - INFLUXD_QUERY_QUEUE_SIZE=64  # REDUCED from 128
     volumes:
       - influxdb-data:/var/lib/influxdb2
       # Optional: Use tmpfs for WAL for faster writes (data loss risk on crash)

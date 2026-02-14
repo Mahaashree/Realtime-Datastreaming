@@ -469,31 +469,31 @@ class MQTTCollectorWithMonitoring:
     def _init_influxdb(self):
         """Initialize InfluxDB connections with separate clients for live and offline pipelines."""
         try:
-            # LIVE CLIENT - Dedicated connection pool for live data (low latency priority)
+            # LIVE CLIENT - Optimized for ULTRA LOW LATENCY
             self.influx_client_live = InfluxDBClient(
                 url=INFLUXDB_URL,
                 token=INFLUXDB_TOKEN,
                 org=INFLUXDB_ORG,
-                timeout=30000,                 # Conservative 30 second timeout
-                enable_gzip=True,              # Enable compression for better throughput
-                connection_pool_maxsize=5,     # 5 connections dedicated for live
-                retries=3                      # Conservative retry count
+                timeout=2000,                  # 2 second timeout for fast failure
+                enable_gzip=False,             # Disable compression for speed
+                connection_pool_maxsize=10,    # More connections for parallelism
+                retries=1                      # Minimal retries for speed
             )
             
             # Test live connection
             self.influx_client_live.ping()
             self.logger.info("InfluxDB LIVE client connection successful", connection_pool_size=5)
             
-            # OFFLINE CLIENT - Separate connection pool for offline data (throughput priority)
+            # OFFLINE CLIENT - Optimized for throughput with reasonable latency
             offline_pool_size = int(os.getenv("INFLUXDB_OFFLINE_CONNECTION_POOL_SIZE", "2"))
             self.influx_client_offline = InfluxDBClient(
                 url=INFLUXDB_URL,
                 token=INFLUXDB_TOKEN,
                 org=INFLUXDB_ORG,
-                timeout=60000,                 # Longer timeout for offline (60s)
-                enable_gzip=True,              # Enable compression
-                connection_pool_maxsize=offline_pool_size,  # Limited connections for offline
-                retries=3
+                timeout=5000,                  # 5 second timeout (faster than before)
+                enable_gzip=True,              # Keep compression for offline bulk writes
+                connection_pool_maxsize=offline_pool_size,
+                retries=2                      # Reduced retries
             )
             
             # Test offline connection
@@ -520,18 +520,18 @@ class MQTTCollectorWithMonitoring:
         self.write_api_offline = self.influx_client_offline.write_api()
 
         
-        # Initialize DUAL async writers with SEPARATE clients
-        # Live writer: Aggressive settings for sub-1s latency, uses LIVE client
-        live_batch_size = int(os.getenv("INFLUXDB_LIVE_BATCH_SIZE", "25"))
-        live_flush_ms = int(os.getenv("INFLUXDB_LIVE_FLUSH_INTERVAL", "75"))
+        # Initialize DUAL async writers with OPTIMIZED LOW LATENCY settings
+        # Live writer: ULTRA AGGRESSIVE settings for sub-500ms latency
+        live_batch_size = int(os.getenv("INFLUXDB_LIVE_BATCH_SIZE", "10"))  # Smaller batches
+        live_flush_ms = int(os.getenv("INFLUXDB_LIVE_FLUSH_INTERVAL", "25"))  # 25ms flush
         
         self.live_writer = AsyncInfluxWriter(
-            write_api=self.write_api_live,  # Uses LIVE client with 5 connections
+            write_api=self.write_api_live,  # Uses LIVE client with 10 connections
             bucket=INFLUXDB_BUCKET,
-            max_workers=8,
+            max_workers=12,                 # More workers for parallelism
             batch_size=live_batch_size,
             flush_interval=live_flush_ms / 1000.0,
-            max_queue_size=2000,
+            max_queue_size=1000,            # Smaller queue for faster processing
             success_callback=self._live_write_success_callback,
             error_callback=self._write_error_callback
         )

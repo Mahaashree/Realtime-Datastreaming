@@ -56,3 +56,6 @@ docker/mosquitto/log/
 
 collector/logs/*.log
 
+
+# Instance lock files
+.instance_locks/

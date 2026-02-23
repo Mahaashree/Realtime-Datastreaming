@@ -959,7 +959,7 @@ class MQTTCollectorWithMonitoring:
             return False
         return bool(DEVICE_ID_REGEX.match(device_id))
 
-    def _validate_timestamp(self, ts, device_id='unknown') -> float | None:
+    def _validate_timestamp(self, ts, device_id='unknown'):
         """Validate timestamp drift. Returns float or None on rejection."""
         if ts is None:
             return None
@@ -1052,7 +1052,7 @@ class MQTTCollectorWithMonitoring:
                 .tag("collector",        "python")
                 .field("speed",               speed)
                 .field("detection_confidence", float(det_conf))
-                .field("gps_available",        bool(gps.get("available", False)))
+                .field("gps_available",        int(bool(gps.get("available", False))))
                 .field("latency_seconds",      latency_seconds)
                 .time(int(ts * 1e9))  # nanosecond precision
             )
@@ -1156,7 +1156,7 @@ class MQTTCollectorWithMonitoring:
                 .tag("device_id", device_id)
                 .field("status",          str(payload.get('status', 'unknown')))
                 .field("uptime_seconds",   int(payload.get('uptime_seconds', 0)))
-                .field("diagnostics_ok",   bool(payload.get('diagnostics_ok', False)))
+                .field("diagnostics_ok",   int(bool(payload.get('diagnostics_ok', False))))
                 .time(int(ts * 1e9))
             )
 
@@ -1187,13 +1187,13 @@ class MQTTCollectorWithMonitoring:
             point = (
                 Point("device_diagnostics")
                 .tag("device_id", device_id)
-                .field("camera_ok",       bool(payload.get('camera_ok', False)))
-                .field("speaker_ok",      bool(payload.get('speaker_ok', False)))
-                .field("led_ok",          bool(payload.get('led_ok', False)))
-                .field("gsm_ok",          bool(payload.get('gsm_ok', False)))
-                .field("gps_ok",          bool(payload.get('gps_ok', False)))
-                .field("can_ok",          bool(payload.get('can_ok', False)))
-                .field("internet_ok",     bool(payload.get('internet_ok', False)))
+                .field("camera_ok",       int(bool(payload.get('camera_ok', False))))
+                .field("speaker_ok",      int(bool(payload.get('speaker_ok', False))))
+                .field("led_ok",          int(bool(payload.get('led_ok', False))))
+                .field("gsm_ok",          int(bool(payload.get('gsm_ok', False))))
+                .field("gps_ok",          int(bool(payload.get('gps_ok', False))))
+                .field("can_ok",          int(bool(payload.get('can_ok', False))))
+                .field("internet_ok",     int(bool(payload.get('internet_ok', False))))
                 .field("firmware_version", str(payload.get('firmware_version', 'unknown')))
                 .time(int(ts * 1e9))
             )

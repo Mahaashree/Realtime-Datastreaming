@@ -3,10 +3,18 @@ MQTT Collector with Dual-Pipeline Optimization - PRODUCTION READY
 Implements adaptive thread allocation for live and offline message processing
 Optimized for 50-200 device deployment with separate pipeline queues
 Includes device database monitoring for automatic offline message processing
+Supports all 6 MQTT device topics per BIPL spec:
+  device/data/{uuid}        → device_telemetry measurement
+  device/alerts/{uuid}      → device_alerts measurement
+  device/status/{uuid}      → device_heartbeat measurement
+  device/diag/{uuid}        → device_diagnostics measurement
+  device/config_ack/{uuid}  → device_config_ack measurement
+  device/config/{uuid}      → Server→Device (subscribed for logging only)
 """
 import json
 import time
 import os
+import re
 import threading
 import ssl
 import sqlite3
@@ -19,6 +27,22 @@ import paho.mqtt.client as mqtt
 from dotenv import load_dotenv
 from flask import Flask, jsonify
 from threading import Thread
+
+# ── Validation constants ──────────────────────────────────────────────────────
+DEVICE_ID_REGEX = re.compile(r'^[A-Za-z0-9\-_]{1,50}$')
+TIMESTAMP_DRIFT_MAX = 300   # ±5 minutes in seconds
+TIMESTAMP_WARN_SECONDS = 30  # log warning if drift > 30 s
+SPEED_MAX = 300.0           # km/h hard clamp
+VALID_DETECTION_LABELS = {"awake", "yawn", "eyes_closed", "distraction", "phone_usage", "smoking"}
+
+# ── Topic routing map ────────────────────────────────────────────────────────
+TOPIC_TELEMETRY   = "device/data/"
+TOPIC_ALERTS      = "device/alerts/"
+TOPIC_STATUS      = "device/status/"
+TOPIC_DIAG        = "device/diag/"
+TOPIC_CONFIG      = "device/config/"
+TOPIC_CONFIG_ACK  = "device/config_ack/"
+TOPIC_OFFLINE     = "device/offline/"
 
 # Import monitoring module
 from monitoring import MetricsCollector, StructuredLogger, print_alert_notification
@@ -681,23 +705,31 @@ class MQTTCollectorWithMonitoring:
             self.logger.critical("SEVERE: High drop rate - system overwhelmed!")
     
     def _on_connect(self, client, userdata, flags, rc):
-        """MQTT connection callback."""
+        """MQTT connection callback — subscribes to all 6 device topics."""
         if rc == 0:
             protocol = "TLS" if MQTT_USE_TLS else "TCP"
             self.logger.info("Connected to MQTT broker",
                            host=MQTT_BROKER_HOST,
                            port=MQTT_BROKER_PORT,
                            protocol=protocol)
-            
-            # Subscribe to topics with QoS 1
-            client.subscribe("device/data/+", qos=1)
-            client.subscribe("device/offline/+", qos=1)  # Event-driven offline notifications
-            
-            self.logger.info("Subscribed to MQTT topics", 
-                           topics=["device/data/+", "device/offline/+"],
-                           qos=1)
-            
+
+            # ── Subscribe to all 6 device topics ─────────────────────────
+            topics = [
+                ("device/data/+",       1),  # Telemetry  → device_telemetry
+                ("device/alerts/+",     1),  # Alerts     → device_alerts
+                ("device/status/+",     1),  # Heartbeat  → device_heartbeat
+                ("device/diag/+",       1),  # Diagnostics→ device_diagnostics
+                ("device/config/+",     1),  # Config push (server→device, log only)
+                ("device/config_ack/+", 1),  # Config ack → device_config_ack
+                ("device/offline/+",    1),  # Event-driven offline notifications
+            ]
+            client.subscribe(topics)
+
+            topic_names = [t[0] for t in topics]
+            self.logger.info("Subscribed to MQTT topics",
+                           topics=topic_names, qos=1)
             print(f"✅ Connected to MQTT broker: {MQTT_BROKER_HOST}:{MQTT_BROKER_PORT}")
+            print(f"   Subscribed to: {', '.join(topic_names)}")
         else:
             error_messages = {
                 1: "incorrect protocol version",
@@ -707,7 +739,7 @@ class MQTTCollectorWithMonitoring:
                 5: "not authorized"
             }
             error_msg = error_messages.get(rc, f"unknown error ({rc})")
-            self.logger.error("MQTT connection failed", 
+            self.logger.error("MQTT connection failed",
                             return_code=rc,
                             error=error_msg)
             print(f"❌ MQTT connection failed: {error_msg}")
@@ -719,27 +751,34 @@ class MQTTCollectorWithMonitoring:
             print(f"⚠️  MQTT disconnected (rc={rc}), reconnecting...")
     
     def _on_message(self, client, userdata, msg):
-        """MQTT message callback - route to appropriate queue with deduplication."""
+        """MQTT message callback — route by topic to appropriate queue."""
         try:
-            # EVENT-DRIVEN: Check if this is an offline notification
-            if msg.topic.startswith("device/offline/"):
+            topic = msg.topic
+
+            # ── Offline event notification (internal, not a device data topic) ──
+            if topic.startswith(TOPIC_OFFLINE):
                 self._handle_offline_notification(msg)
                 return
-            
-            # Record message received
+
+            # ── Config push is server→device; collector subscribes only to log ──
+            if topic.startswith(TOPIC_CONFIG) and not topic.startswith(TOPIC_CONFIG_ACK):
+                device_uuid = topic.split('/')[-1]
+                self.logger.info("Config push observed on broker",
+                                 device_id=device_uuid, topic=topic)
+                return
+
+            # Record message received for all other device topics
             self.metrics.record_message_received()
-            
-            collector_receive_time = time.time()
-            
+
             message_data = {
                 'payload': msg.payload,
-                'collector_receive_time': collector_receive_time,
-                'topic': msg.topic
+                'collector_receive_time': time.time(),
+                'topic': topic
             }
-            
+
             # Route to appropriate queue
             self._route_message(message_data)
-                
+
         except Exception as e:
             self.metrics.record_error()
             self.logger.error("Error in message callback", error=str(e))
@@ -855,9 +894,13 @@ class MQTTCollectorWithMonitoring:
             payload = json.loads(message_data['payload'].decode())
             
             # Generate message ID for deduplication
+            # Include topic category so alerts and telemetry at same timestamp
+            # are NOT considered duplicates of each other.
             device_id = payload.get('device_id', 'unknown')
             timestamp = payload.get('timestamp', time.time())
-            msg_id = f"{device_id}_{timestamp}"
+            topic = message_data.get('topic', '')
+            topic_key = '/'.join(topic.split('/')[:2])  # e.g. "device/data"
+            msg_id = f"{topic_key}_{device_id}_{timestamp}"
             
             # OPTIMIZED DEDUPLICATION - Fast check with minimal lock time
             with self.seen_message_ids_lock:
@@ -908,77 +951,298 @@ class MQTTCollectorWithMonitoring:
             self.metrics.record_error()
             self.logger.error("Error routing message", error=str(e))
     
+    # ── Validation helpers ──────────────────────────────────────────────────
+
+    def _validate_device_id(self, device_id) -> bool:
+        """Validate device_id format per spec."""
+        if not device_id or not isinstance(device_id, str):
+            return False
+        return bool(DEVICE_ID_REGEX.match(device_id))
+
+    def _validate_timestamp(self, ts, device_id='unknown') -> float | None:
+        """Validate timestamp drift. Returns float or None on rejection."""
+        if ts is None:
+            return None
+        try:
+            ts_f = float(ts)
+        except (ValueError, TypeError):
+            return None
+        drift = abs(time.time() - ts_f)
+        if drift > TIMESTAMP_DRIFT_MAX:
+            self.logger.warning("Rejecting message: timestamp drift too large",
+                                device_id=device_id, drift_seconds=drift)
+            return None
+        if drift > TIMESTAMP_WARN_SECONDS:
+            self.logger.warning("Timestamp drift detected",
+                                device_id=device_id, drift_seconds=drift)
+        return ts_f
+
+    def _clamp_speed(self, speed_raw, device_id='unknown') -> float:
+        """Clamp speed to valid range and log anomalies."""
+        try:
+            speed = float(speed_raw)
+        except (ValueError, TypeError):
+            return 0.0
+        if speed < 0.0 or speed > SPEED_MAX:
+            self.logger.warning("Speed anomaly clamped",
+                                device_id=device_id, raw=speed_raw,
+                                clamped=max(0.0, min(speed, SPEED_MAX)))
+            return max(0.0, min(speed, SPEED_MAX))
+        return speed
+
+    # ── Per-topic message processors ────────────────────────────────────────
+
     def _process_message(self, message_data):
-        """Process message with latency tracking."""
+        """Dispatch to the correct topic handler based on topic prefix."""
+        topic = message_data.get('topic', '')
+
+        if topic.startswith(TOPIC_TELEMETRY):
+            return self._process_telemetry(message_data)
+        elif topic.startswith(TOPIC_ALERTS):
+            return self._process_alert(message_data)
+        elif topic.startswith(TOPIC_STATUS):
+            return self._process_heartbeat(message_data)
+        elif topic.startswith(TOPIC_DIAG):
+            return self._process_diagnostics(message_data)
+        elif topic.startswith(TOPIC_CONFIG_ACK):
+            return self._process_config_ack(message_data)
+        else:
+            # Unknown topic — still try legacy telemetry parsing
+            return self._process_telemetry(message_data)
+
+    def _process_telemetry(self, message_data):
+        """Process device/data/{uuid} → measurement: device_telemetry."""
         try:
             payload = json.loads(message_data['payload'].decode())
             collector_receive_time = message_data['collector_receive_time']
             device_id = payload.get('device_id')
-            
-            if not device_id:
+
+            if not self._validate_device_id(device_id):
                 self.metrics.record_error()
                 return None
-            
-            # Calculate end-to-end latency
-            publish_timestamp = payload.get('timestamp')
-            latency_seconds = None
-            if publish_timestamp:
-                latency_seconds = collector_receive_time - float(publish_timestamp)
-            
-            # Create InfluxDB point
-            point = Point("device_data") \
-                .tag("device_id", device_id) \
-                .tag("collector", "python") \
-                .field("collector_receive_time", float(collector_receive_time))
-            
-            # Add all numeric fields
-            field_mappings = {
-                'timestamp': 'publish_timestamp',
-                'speed': 'speed',
-                'cpu_usage': 'cpu_usage',
-                'ram_usage': 'ram_usage',
-                'memory_total': 'memory_total',
-                'memory_used': 'memory_used',
-                'memory_available': 'memory_available',
-                'memory_percent': 'memory_percent',
-                'disk_total': 'disk_total',
-                'disk_used': 'disk_used',
-                'disk_free': 'disk_free',
-                'disk_percent': 'disk_percent',
-                'network_bytes_sent': 'network_bytes_sent',
-                'network_bytes_recv': 'network_bytes_recv',
-                'detection_confidence': 'detection_confidence'
-            }
-            
-            for src, dst in field_mappings.items():
-                if src in payload:
+
+            ts = self._validate_timestamp(payload.get('timestamp'), device_id)
+            if ts is None:
+                self.metrics.record_error()
+                return None
+
+            latency_seconds = collector_receive_time - ts
+
+            # Detection sub-object
+            detection = payload.get('detection', {})
+            det_label = str(detection.get('label', 'awake'))
+            det_conf  = detection.get('confidence', 1.0)
+            if det_label not in VALID_DETECTION_LABELS:
+                self.logger.warning("Unknown detection label (passing through)",
+                                    device_id=device_id, label=det_label)
+
+            # GPS sub-object
+            gps = payload.get('gps', {})
+
+            # Telemetry sub-object
+            telemetry = payload.get('telemetry', {})
+
+            # Speed with validation
+            speed = self._clamp_speed(payload.get('speed', 0.0), device_id)
+
+            point = (
+                Point("device_telemetry")
+                .tag("device_id",        device_id)
+                .tag("detection_label",  det_label)
+                .tag("collector",        "python")
+                .field("speed",               speed)
+                .field("detection_confidence", float(det_conf))
+                .field("gps_available",        bool(gps.get("available", False)))
+                .field("latency_seconds",      latency_seconds)
+                .time(int(ts * 1e9))  # nanosecond precision
+            )
+
+            # Optional GPS fields
+            lat = gps.get("latitude")
+            lon = gps.get("longitude")
+            if lat is not None:
+                point = point.field("gps_lat", float(lat))
+            if lon is not None:
+                point = point.field("gps_lon", float(lon))
+
+            # Optional telemetry fields
+            for src, dst in [
+                ("cpu_usage",     "cpu_usage"),
+                ("ram_usage",     "ram_usage"),
+                ("memory_percent","memory_percent"),
+                ("disk_percent",  "disk_percent"),
+            ]:
+                val = telemetry.get(src)
+                if val is not None:
                     try:
-                        point = point.field(dst, float(payload[src]))
+                        point = point.field(dst, float(val))
                     except (ValueError, TypeError):
-                        pass  # Skip invalid numeric values
-            
-            # Add latency as field for querying
-            if latency_seconds and latency_seconds > 0:
-                point = point.field("latency_seconds", latency_seconds)
-            
-            # Detection label tag
-            if "detection_label" in payload:
-                point = point.tag("detection_label", str(payload["detection_label"]))
-            
-            # Return point, MQTT latency, and publish_timestamp for full latency calculation
-            publish_ts_float = float(publish_timestamp) if publish_timestamp else None
-            return (point, latency_seconds, publish_ts_float)
-            
+                        pass
+
+            return (point, latency_seconds, ts)
+
         except json.JSONDecodeError:
             self.metrics.record_error()
             return None
         except Exception as e:
             self.metrics.record_error()
-            # Log only every 100 errors
             if self.metrics.error_messages % 100 == 0:
-                self.logger.error("Message processing error", 
-                                error=str(e),
-                                error_count=self.metrics.error_messages)
+                self.logger.error("Telemetry processing error", error=str(e))
+            return None
+
+    def _process_alert(self, message_data):
+        """Process device/alerts/{uuid} → measurement: device_alerts."""
+        try:
+            payload = json.loads(message_data['payload'].decode())
+            device_id = payload.get('device_id')
+
+            if not self._validate_device_id(device_id):
+                self.metrics.record_error()
+                return None
+
+            ts = self._validate_timestamp(payload.get('timestamp'), device_id)
+            if ts is None:
+                self.metrics.record_error()
+                return None
+
+            gps = payload.get('gps', {})
+            speed = self._clamp_speed(payload.get('speed', 0.0), device_id)
+
+            point = (
+                Point("device_alerts")
+                .tag("device_id",   device_id)
+                .tag("alert_type",  str(payload.get('alert_type', 'unknown')))
+                .tag("severity",    str(payload.get('severity', 'low')))
+                .field("detection_label", str(payload.get('detection_label', '')))
+                .field("speed",           speed)
+                .field("details",         str(payload.get('details', '')))
+                .time(int(ts * 1e9))
+            )
+
+            lat = gps.get('latitude')
+            lon = gps.get('longitude')
+            if lat is not None:
+                point = point.field("gps_lat", float(lat))
+            if lon is not None:
+                point = point.field("gps_lon", float(lon))
+
+            return (point, None, ts)
+
+        except json.JSONDecodeError:
+            self.metrics.record_error()
+            return None
+        except Exception as e:
+            self.metrics.record_error()
+            self.logger.error("Alert processing error", error=str(e))
+            return None
+
+    def _process_heartbeat(self, message_data):
+        """Process device/status/{uuid} → measurement: device_heartbeat."""
+        try:
+            payload = json.loads(message_data['payload'].decode())
+            device_id = payload.get('device_id')
+
+            if not self._validate_device_id(device_id):
+                self.metrics.record_error()
+                return None
+
+            ts = self._validate_timestamp(payload.get('timestamp'), device_id)
+            if ts is None:
+                # Heartbeats: use server time if device time is stale (LWT may lack timestamp)
+                ts = time.time()
+
+            point = (
+                Point("device_heartbeat")
+                .tag("device_id", device_id)
+                .field("status",          str(payload.get('status', 'unknown')))
+                .field("uptime_seconds",   int(payload.get('uptime_seconds', 0)))
+                .field("diagnostics_ok",   bool(payload.get('diagnostics_ok', False)))
+                .time(int(ts * 1e9))
+            )
+
+            return (point, None, ts)
+
+        except json.JSONDecodeError:
+            self.metrics.record_error()
+            return None
+        except Exception as e:
+            self.metrics.record_error()
+            self.logger.error("Heartbeat processing error", error=str(e))
+            return None
+
+    def _process_diagnostics(self, message_data):
+        """Process device/diag/{uuid} → measurement: device_diagnostics."""
+        try:
+            payload = json.loads(message_data['payload'].decode())
+            device_id = payload.get('device_id')
+
+            if not self._validate_device_id(device_id):
+                self.metrics.record_error()
+                return None
+
+            ts = self._validate_timestamp(payload.get('timestamp'), device_id)
+            if ts is None:
+                ts = time.time()
+
+            point = (
+                Point("device_diagnostics")
+                .tag("device_id", device_id)
+                .field("camera_ok",       bool(payload.get('camera_ok', False)))
+                .field("speaker_ok",      bool(payload.get('speaker_ok', False)))
+                .field("led_ok",          bool(payload.get('led_ok', False)))
+                .field("gsm_ok",          bool(payload.get('gsm_ok', False)))
+                .field("gps_ok",          bool(payload.get('gps_ok', False)))
+                .field("can_ok",          bool(payload.get('can_ok', False)))
+                .field("internet_ok",     bool(payload.get('internet_ok', False)))
+                .field("firmware_version", str(payload.get('firmware_version', 'unknown')))
+                .time(int(ts * 1e9))
+            )
+
+            return (point, None, ts)
+
+        except json.JSONDecodeError:
+            self.metrics.record_error()
+            return None
+        except Exception as e:
+            self.metrics.record_error()
+            self.logger.error("Diagnostics processing error", error=str(e))
+            return None
+
+    def _process_config_ack(self, message_data):
+        """Process device/config_ack/{uuid} → measurement: device_config_ack."""
+        try:
+            payload = json.loads(message_data['payload'].decode())
+            device_id = payload.get('device_id')
+
+            if not self._validate_device_id(device_id):
+                self.metrics.record_error()
+                return None
+
+            ts = self._validate_timestamp(payload.get('timestamp'), device_id)
+            if ts is None:
+                ts = time.time()
+
+            status = str(payload.get('status', 'unknown'))
+            self.logger.info("Config ack received",
+                             device_id=device_id, status=status,
+                             message=payload.get('message', ''))
+
+            point = (
+                Point("device_config_ack")
+                .tag("device_id", device_id)
+                .tag("status",    status)
+                .field("message", str(payload.get('message', '')))
+                .time(int(ts * 1e9))
+            )
+
+            return (point, None, ts)
+
+        except json.JSONDecodeError:
+            self.metrics.record_error()
+            return None
+        except Exception as e:
+            self.metrics.record_error()
+            self.logger.error("Config ack processing error", error=str(e))
             return None
     
     def _worker_thread(self):
